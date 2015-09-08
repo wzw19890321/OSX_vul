@@ -1,0 +1,126 @@
+Issue: 40
+OS X IOKit kernel code execution due to heap overflow in  IOHIKeyboardMapper::parseKeyMapping
+
+The function IOHIKeyboardMapper::parseKeyMapping(const UInt8 * map, UInt32 mappingLen, NXParsedKeyMapping * parsedMapping)
+can be reached by a regular user by setting the HIDKeyMapping property of IOHIDKeyboard in the IOKit registry.
+
+This function is responsible for parsing a binary keymapping file.
+
+The function NextNum reads either 1 or two bytes from map depending on whether the first two bytes in the file are non-zero.
+
+  IOHIKeyboardMapper::parseKeyMapping(const UInt8 * map, UInt32 mappingLen, NXParsedKeyMapping * parsedMapping)
+    ...
+    parsedMapping->numSeqs = NextNum(&nmd);         <-- (a)
+    if (parsedMapping->numSeqs <= maxSeqNum)        <-- (b)
+      return false;
+      
+    for(i = 0; i < parsedMapping->numSeqs; i++)
+    {
+      parsedMapping->seqDefs[i] = (unsigned char *)nmd.bp; <-- (c)
+      for(j=0, l=NextNum(&nmd); j<l; j++)
+      {
+              NextNum(&nmd);
+              NextNum(&nmd);
+      }
+    }
+
+At (a) this function reads the number of sequence definitions follow, at (b) this number is checked against a lower bound however
+there is no upper-bound check. By specifying a large value for numSeqs (can be up to 0xffff) we can overflow the fixed-size seqDefs buffer at (c).
+
+seqDefs is defined here:
+  
+  typedef struct _NXParsedKeyMapping_ {
+    short shorts;
+    char  keyBits[NX_NUMKEYCODES];
+    int     maxMod;
+    unsigned char *modDefs[NX_NUMMODIFIERS];
+    int     numDefs;
+    unsigned char *keyDefs[NX_NUMKEYCODES];
+    int     numSeqs;
+    unsigned char *seqDefs[NX_NUMSEQUENCES];         <-- seqDefs ( #define NX_NUMSEQUENCES  128 )
+    int     numSpecialKeys;
+    unsigned short specialKeys[NX_NUMSPECIALKEYS];
+    const unsigned char *mapping;
+    int mappingLen;
+  } NXParsedKeyMapping;
+
+It's actually very easy to get code execution with this buffer overflow:
+
+This NXParsedKeyMapping is a member var of IOHIKeyboardMapper:
+
+class IOHIKeyboardMapper : public OSObject
+{
+private:
+  IOHIKeyboard *    _delegate;
+  bool        _mappingShouldBeFreed;
+  NXParsedKeyMapping  _parsedMapping;                       <-- _parsedMapping.seqDefs will be overflowed
+  IOHIDSystem  *    _hidSystem;
+...
+  ExpansionData * _reserved;
+...
+  UInt32              _stickyKeys_State; 
+  int           _stickyKeys_NumModifiersDown;
+  UInt8         _stickyKeys_Modifiers[kMAX_MODIFIERS];
+  StickyKeys_ToggleInfo * _stickyKeys_ShiftToggle;
+  StickyKeys_ToggleInfo * _stickyKeys_OptionToggle;
+  bool        _stateDirty;
+  OSDictionary *    _onParamDict;                           <-- pointer to an object with virtual method
+
+We can easily cause a virtual method to be called on _onParamDict by ensuring that parseKeyMapping returns false indicating
+an error parsing the keyfile. This will cause a call to: IOHIKeyboardMapper::free which will call stickyKeysFree:
+
+   void IOHIKeyboardMapper::stickyKeysfree (void)
+  {
+    ...
+    if (_onParamDict)            <-- we overwrite this pointer
+      _onParamDict->release();   <-- virtual method ( offset 0x28 in the vtable)
+
+Some offsets:
+
+_onParamDict is at offset 0xe30 in the IOHIDKeyboardMapper
+
+seqDefs is at offset 0x998 in NXParsedKeyMapping, and NXParsedKeyMapping is at offset 0x20 in IOHIKeyboardMapper:
+
++0x000: IOHIKeyboardMapper
+...
++0x020:   NXParsedKeyMapping _parsedMapping
+...
++0x9b8:     unsigned char* seqDefs[]  -+
+...                                    | 0x478 bytes -> 0x8f pointers
++0xe30:   OSDictionary* _onParamDict  -+
+
+
+So the 0x90th seqDef entry will overlap with the _onParamDict pointer.
+
+Looking again at the parseKeyMapping function snippet where the overflow takes place:
+
+  for(i = 0; i < parsedMapping->numSeqs; i++)
+  {
+    parsedMapping->seqDefs[i] = (unsigned char *)nmd.bp;
+    for(j=0, l=NextNum(&nmd); j<l; j++)
+    {
+            NextNum(&nmd);
+            NextNum(&nmd);
+    }
+
+(nmb.bp points to the next number to parse.)
+
+This loop is parsing a length followed by twice that number of Nums.
+
+We can supply 0x8f entries of: 0x00 0x00 (len=0)
+followed by one entry of: 0x00 0x02 (len = 0x2)
+                          0x00 0x78 0x56 0x00
+                          0x00 0x00 0x00 0x00
+
+which will overwrite the _onParamDict pointer with a pointer to: 0x5678000000 which will be intepreted as a pointer to
+a vtable :-) We can then map that page in userspace and write a fake vtable at 0x5678000200.
+
+We can then force the parseKeyMapping function to return false here by supplying a value larger than NX_NUMSPECIALKEYS:
+  numMods = NextNum(&nmd);
+  parsedMapping->numSpecialKeys = numMods;
+  if ( numMods > NX_NUMSPECIALKEYS )
+    return false;
+
+PoC attached.
+
+CVE-2014-4404 

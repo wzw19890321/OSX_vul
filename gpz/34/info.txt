@@ -1,0 +1,12 @@
+Issue 34:	OS X IOKit kernel code execution due to multiple bounds checking issues in IGAccelGLContext token parsing (x3)
+
+The functions IGAccelGLContext::process_token_BindConstantBuffers, IGAccelGLContext::process_token_BindDrawFBOColor and GAccelGLContext::process_token_BindTextures fail to bounds-check the dword at offset 0x10 of the token they're parsing - this value is read from user/kernel shared memory and is thus completely attacker controlled. The value is used as the index for a kernel memory write.
+
+(See previous token parsing bugs for more details of the IOAccelerator token structures.)
+
+These PoCs find the tokens in shared memory and set the offset to a large value to cause a kernel panic.
+
+IMPACT:
+This userclient can be instantiated from the chrome gpu sandbox and the safari renderer sandbox
+
+CVE-2014-4416 

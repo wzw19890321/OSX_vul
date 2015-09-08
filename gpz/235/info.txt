@@ -1,0 +1,18 @@
+Issue 235:	OS X sandbox escape due to heap corruption in fontd (SwapHFSName)
+
+
+The fontd message with msgh_id value 0x1e (FOActivateFontsWithInfoMessage) contains two cstrings
+at offsets +0x20 and +0x220.
+A pointer to the second of these strings is passed to ActivateFontFromMessage which in turn passes it
+as the third argument to FODBReviveFromDumpFile which will lstat that string and then open the file if it was a
+valid path. It then mmap's the contents of the file into memory. It reads a uint16_t at offset 0xc and swaps the endianness
+then passes that value and a pointer to offset 0xc in the mmaped buffer to SwapHFSName. SwapHFSName then uses that uint16_t as the count of uint16_t's in the buffer to endian-swap. There's no check that the buffer size is valid and SwapHFSName will walk off the end of the mmap'ed buffer leading to heap corruption.
+
+You need to be able to create at least one file on disk with controlled contents to exploit this bug but most sandboxes allow
+that. Safari renderers for example have full write access to many directories and Chrome renderers can use methods like "<a download>" and content-disposition:attachment headers to get files written to disk. This PoC makes some files in /tmp to trigger the bug
+but write access to /tmp is not required. These files could be anywhere where fontd can read them.
+
+fontd is an unsandboxed daemon running as a regular user. It's reachable from various sandboxes including chrome and safari
+renderer processes. Attached PoC tested on OS X 10.10.2
+
+CVE-2015-1135

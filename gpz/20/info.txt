@@ -1,0 +1,59 @@
+Issue 20:	OS X IOKit Multiple exploitable kernel NULL dereferences (x4)
+
+I took another look at the mach-o loading code yesterday and noticed that OS X only raises the vm_map min_addr for 64-bit programs (this can be trivially avoided, but *should* provide some protection for sandboxed 64-bit processes...) Chrome is still 32-bit, which means you can literally just vm_deallocate the --- page at address 0 and vm_allocate a rw- one there :-(
+
+Relevant code from the loader:
+
+**************
+mach_loader.c
+load_segment(
+	boolean_t		prohibit_pagezero_mapping = FALSE;
+...
+
+		/* XXX (4596982) this interferes with Rosetta, so limit to 64-bit tasks */
+		if (scp->cmd == LC_SEGMENT_64) {
+		        prohibit_pagezero_mapping = TRUE;
+		}
+
+		if (prohibit_pagezero_mapping) {
+...
+			ret = vm_map_raise_min_offset(map, seg_size); //only place this is called
+*************
+
+This leads to some quite nice bugs actually - I'm reporting four to Apple now which are all reachable from the chrome GPU process sandbox.
+
+The first two are in the Intel graphics driver again - it's possible to call an external method before the pointer to the methodDescs has been initialized (which is done in contextStart.) If you set things up correctly you can craft a fake IOExternalMethod near NULL which will get passed to shim_io_connect_method_scalarI_scalarO where you can reach this code:
+
+                    err = (object->*func)(  ARG32(input[0]), ARG32(input[1]), ARG32(input[2]),
+                                          ARG32(input[3]), ARG32(input[4]), ARG32(input[5]) );
+
+where func and input are user controlled (they're read from the IOExternalMethod.) This is pretty cool as you get control of a c++ pointer to member method :-) I didn't actually know how those were implemented until I looked at the disassembly of this - if the least significant bit of func is set then it's treated as an offset into the vtable of object (after subtracting 1.) If the least significant bit is clear then it's just a regular function pointer. You could easily get a UaF from this by calling the destructor but there's almost certainly loads you could do with this.
+
+I've attached two PoCs (both different bugs) which demonstrate both pointer-to-virtual-member-method and function pointer crashes.
+
+I've also attached two more PoCs which show similar issues in the nVidia graphics driver (used in the MacBookPro.) These also give trivial instruction pointer control (they actually crash trying to take a lock, but the address of that lock is controlled. Right after that the call virtual functions from a controlled vtable address.)
+
+--
+
+(The minimum address field of the vm_map_t is min_offset, not min_addr - I corrected this before I sent the report to apple)
+
+--
+
+Apple replied on May 16th. The asked me to keep their reply confidential so I'll summarise:
+
+ * They know that the NULL page is mappable, it may be fixed, who knows when.
+ * They think there are mitigating circumstances for exploiting this.
+
+I replied on May 22nd asking for further details of the mitigating circumstances, since I've verified that these bugs get you kernel RIP from inside the chrome sandbox. I offered to share an actual exploit with them rather than just a PoC which panics at a controlled address.
+
+--
+
+Apple sent me a draft of the advisory for these bugs. The advisory isn't clear on the exploitability of these bugs in 32-bit vs 64-bit processes (well, whether the mach-o which was loaded was 32-bit or 64-bit.)
+
+The advisory claims that a "maliciously crafted 32-bit executable" is required - that isn't the case. The NULL page is *always* mappable for a sandboxed 32-bit process, you don't need to craft the executable at all.
+
+You do need to maliciously craft a 64-bit executable (pass a linker flag to remove the __PAGEZERO segment.)
+
+I sent apple an example of how to exploit these bugs from a 64-bit process (attached) and explained in more detail that these bugs don't require any modifications of 32-bit executables to be exploited (and therefore are exploitable from, for example, the chrome GPU sandbox.)
+
+ CVE-2014-1379 

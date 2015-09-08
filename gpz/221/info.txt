@@ -1,0 +1,112 @@
+Issue 221:	OS X+iOS IOKit kernel code execution due to bad cast when using kernel c++ reflection in IOSurfaceRoot
+
+External method 0 of IOSurfaceRoot is IOSurfaceRootUserClient::create_surface. This method expects to receive an xml string which it
+deserializes into an OSDictionary. It then passes that dictionary to IOSurfaceRoot::createSurface(task *,OSDictionary *)
+
+here's the relevant code:
+
+__text:0000000000005E13                 mov     rax, [rbx]
+__text:0000000000005E16                 lea     rcx, _kIOSurfaceClassName   ; "IOSurfaceClass"
+__text:0000000000005E1D                 mov     rsi, [rcx]
+__text:0000000000005E20                 mov     rdi, rbx                    ; input OSDictionary - contents controlled
+__text:0000000000005E23                 call    qword ptr [rax+208h]
+__text:0000000000005E29                 mov     rcx, cs:off_A030
+__text:0000000000005E30                 mov     rsi, [rcx]      ; char *
+__text:0000000000005E33                 mov     rdi, rax                    ; check that IOSurfaceString was an OSString
+__text:0000000000005E36                 call    __ZN15OSMetaClassBase12safeMetaCastEPKS_PK11OSMetaClass ; OSMetaClassBase::safeMetaCast(OSMetaClassBase const*,OSMetaClass const*)
+__text:0000000000005E3B                 test    rax, rax
+__text:0000000000005E3E                 jz      short loc_5E4A              ; if either there was no "IOSurfaceClass" key or the value wasn't a string then jump
+                                                                            ; to 54ea and use "IOSurface"
+__text:0000000000005E40                 mov     rdi, rax                    ; otherwise, pass the usercontrolled string to OSMetaClass::allocClassWithName
+__text:0000000000005E43                 call    __ZN11OSMetaClass18allocClassWithNameEPK8OSString ; OSMetaClass::allocClassWithName(OSString const*)
+__text:0000000000005E48                 jmp     short loc_5E56
+__text:0000000000005E4A ; ---------------------------------------------------------------------------
+__text:0000000000005E4A
+__text:0000000000005E4A loc_5E4A:                               ; CODE XREF: IOSurfaceRoot::createSurface(task *,OSDictionary *)+4Aj
+__text:0000000000005E4A                 lea     rdi, aIosurface ; "IOSurface"
+__text:0000000000005E51                 call    __ZN11OSMetaClass18allocClassWithNameEPKc ; OSMetaClass::allocClassWithName(char const*)
+__text:0000000000005E56
+__text:0000000000005E56 loc_5E56:                               ; CODE XREF: IOSurfaceRoot::createSurface(task *,OSDictionary *)+54j
+__text:0000000000005E56                 mov     r12, rax        ; save reflection-allocated class pointer into r12
+__text:0000000000005E59                 mov     rdi, [r14+0F8h]
+__text:0000000000005E60                 call    _IORecursiveLockLock
+__text:0000000000005E65                 test    r12, r12
+__text:0000000000005E68                 jz      short loc_5EDD
+__text:0000000000005E6A                 lea     rax, __ZN9IOSurface9metaClassE ; IOSurface::metaClass
+__text:0000000000005E71                 mov     rsi, [rax]
+__text:0000000000005E74                 mov     rdi, r12        ; does that reflection-allocated class's metaclass inherit from IOSurface::metaClass
+__text:0000000000005E77                 call    __ZN15OSMetaClassBase12safeMetaCastEPKS_PK11OSMetaClass ; OSMetaClassBase::safeMetaCast(OSMetaClassBase const*,OSMetaClass const*)
+__text:0000000000005E7C                 test    rax, rax
+__text:0000000000005E7F                 jz      short loc_5EC0  ; if it doesn't jump to 5ec0
+
+...
+
+__text:0000000000005EC0
+__text:0000000000005EC0 loc_5EC0:                               ; CODE XREF: IOSurfaceRoot::createSurface(task *,OSDictionary *)+8Bj
+__text:0000000000005EC0                                         ; IOSurfaceRoot::createSurface(task *,OSDictionary *)+A5j
+__text:0000000000005EC0                 mov     rdi, [r14+0F8h]
+__text:0000000000005EC7                 call    _IORecursiveLockUnlock
+__text:0000000000005ECC                 mov     rax, [r12]      ; r12 is the pointer to the reflection-allocated class
+__text:0000000000005ED0                 mov     rdi, r12
+__text:0000000000005ED3                 call    qword ptr [rax+120h]  ; call the virtual method at offset +0x120 in that objects vtable
+                                                                      ; +0x120 is the offset of IOSurface::release - not OSObject::release - it's only valid for subclasses of
+                                                                      ; IOSurface - for other types this could be anything
+
+
+The code reads a user-controlled string from the input dictionary with the key "IOSurfaceClass" then passes that string to the IOKit C++ reflection API
+OSMetaClass::allocClassWithName. This instantiates a completely user-controlled IOKit class, saving a pointer to the allocated object in r12.
+
+The code then passes that pointer to safeMetaCast to determine if the newly-allocated object is in fact a subtype of IOSurface. If it isn't then the code calls the
+virtual method at offset 0x120 in the controlled object - this offset is outside the vtable of the OSObject base class therefore the code probably looked something like this:
+
+IOSurface* foo = (IOSurface*) allocClassWithName(controlledName);
+if(!safeMetaCast(foo, IOSurface::metaClass)){
+  foo->release(); // calls IOSurface::release which is a virtual method at +0x120 in vtable - not OSObject::release which is +0x28
+}
+
+Attached PoC demonstrates this by instantiating an IOAccelCommandBufferPool2 - this object has a vtable which is smaller that 0x120 clearly demonstrating that this is a bug!
+
+Exploitation would hinge on being able to find an object with a suitably interesting pointer at that offset in its vtable - I would imagine there are almost certainly
+good candidates but I haven't looked yet.
+
+IOSurfaceRootUserClient is reachable in almost all sandboxes on OS X and iOS.
+ 	surfaceroot.c 
+13.3 KB   Download
+Dec 15, 2014 Project Member #1 ianb...@google.com
+(No comment was entered for this change.)
+Labels: Reported-2014-Dec-16 Id-616025208 
+Mar 9, 2015 Project Member #2 cev...@google.com
+OS X: https://support.apple.com/en-us/HT204413
+iOS:  https://support.apple.com/en-us/HT204423
+Status: Fixed 
+Labels: CVE-2015-1061 Fixed-2015-Mar-9 
+Mar 12, 2015 Project Member #3 ianb...@google.com
+This bug isn't fixed :(
+
+The notes for Security Update 2015-002 indicate that it is, but the IOSurface kext doesn't change when you apply that patch and the bug still reproduces for me on multiple fully-patched systems.
+
+Tested on MacBookPro10,1/14C1510 and MacBookAir5,2/14C1510.
+Status: New 
+Labels: -Fixed-2015-Mar-9 
+Mar 12, 2015 Project Member #5 ianb...@google.com
+I've emailed Apple pointing this out.
+Mar 16, 2015 Project Member #6 ianb...@google.com
+Apple acknowledged that there was an error in their patch and requested an extension until March 30th to rectify this.
+Labels: PublicOn-2014-March-30 Deadline-Exceeded Deadline-Grace 
+Mar 16, 2015 Project Member #7 cev...@google.com
+To quickly note the calculation:
+
+Original deadline: Sunday March 15th. Maximum grace period of 14 days takes the new deadline to Sunday March 29th. Since that falls on a Sunday, max grace period is actually Monday March 30th.
+
+So Apple have maxed out the grace period but it is still in bounds.
+Mar 31, 2015 Project Member #8 cev...@google.com
+Finally properly fixed here?
+https://support.apple.com/en-us/HT204563
+
+Ian -- since it was mis-fixed once, did you want to check it again? Otherwise, it's time to make this public.
+Status: Fixed 
+Apr 1, 2015 Project Member #9 ianb...@google.com
+Yep, it's fixed now in 14C1514.
+Labels: -Restrict-View-Commit 
+
+CVE-2015-1061

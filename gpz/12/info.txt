@@ -1,0 +1,88 @@
+Issue 12:	launchd heap corruption due to integer overflow in launch_data_unpack
+
+launchd is the OS X equivalent of init. It runs as root and is the parent of all other processes. On OS X it also serves as the bootstrap server, allowing any process with a send right to the launchd bootstrap mach port (by default all processes, including chrome/safari renderers) to request and register services provided via mach ports.
+
+The MIG methods legacy_ipc_request and swap_complex pass a pointer to an out-of-line buffer containing arguments in a serialized in a custom format, which is deserialized by the function launch_data_unpack:
+
+liblaunch.c:
+
+launch_data_t
+launch_data_unpack(void *data, size_t data_size, int *fds, size_t fd_cnt, size_t *data_offset, size_t *fdoffset)
+{
+  launch_data_t r = data + *data_offset;
+  size_t i, tmpcnt;
+
+  if ((data_size - *data_offset) < sizeof(struct _launch_data))
+    return NULL;
+  *data_offset += sizeof(struct _launch_data);
+...
+
+
+data points to a user-controlled buffer. launch_data_t is typedef'd as a pointer to a struct _launch_data:
+
+liblaunch.c:
+
+struct _launch_data {
+  uint64_t type;
+  union {
+    struct {
+      union {
+        launch_data_t *_array;
+        char *string;
+        void *opaque;
+        int64_t __junk;
+      };
+      union {
+        uint64_t _array_cnt;
+        uint64_t string_len;
+        uint64_t opaque_size;
+      };
+    };
+    int64_t fd;
+    uint64_t  mp;
+    uint64_t err;
+    int64_t number;
+    uint64_t boolean;
+    double float_num;
+  };
+};
+
+launch_data_unpack unpacks each of the _launch_data structures in the input buffer (data.) If the type is one of: LAUNCH_DATA_DICTIONARY,
+LAUNCH_DATA_ARRAY, LAUNCH_DATA_STRING or LAUNCH_DATA_OPAQUE then the struct _launch_data is followed by the payload. launch_data_unpack fixes up the
+pointer (_array, string or opaque) to point to the payload.
+
+The following code unpack arrays and dictionaries:
+
+liblaunch.c:
+
+...
+  case LAUNCH_DATA_DICTIONARY:
+  case LAUNCH_DATA_ARRAY:
+    tmpcnt = big2wire(r->_array_cnt);
+    if ((data_size - *data_offset) < (tmpcnt * sizeof(uint64_t))) {                               <-- (a)
+      errno = EAGAIN;
+      return NULL;
+    }
+    r->_array = data + *data_offset;
+    *data_offset += tmpcnt * sizeof(uint64_t);
+    for (i = 0; i < tmpcnt; i++) {
+      r->_array[i] = launch_data_unpack(data, data_size, fds, fd_cnt, data_offset, fdoffset);     <-- (b)
+      if (r->_array[i] == NULL)                                                                   <-- (c)
+        return NULL;
+    }
+    r->_array_cnt = tmpcnt;
+    break;
+...
+
+The first bug is the lack of an integer overflow check on (tmpcnt * sizeof(uint64_t)). Although this result isn't used for an allocation size, we can still
+leverage it for heap corruption:
+
+By setting tmpcnt to (UINT64_MAX + 1) / 8 we can force the multiplication to overflow to 0. If we also ensure that (data_size - *data_offset) is 0 (that is,
+there is no actual payload data) then r->_array will point to the first byte after the data buffer. At (b) a NULL pointer will then be written to r->_array[0],
+setting the 8 bytes following the data buffer to 0. By crafting a buffer containing an array of strings and arrays its possible to control the size of the data
+buffer exactly.
+
+Exploitation would involve finding something interesting to corrupt, the canonical example would be finding something which was reference counted and
+overwriting the reference count.
+
+CVE-2014-1358 

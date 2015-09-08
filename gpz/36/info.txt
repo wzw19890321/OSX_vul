@@ -1,0 +1,27 @@
+Issue 36:	OS X IOKit kernel code execution due to lack of bounds checking in AppleMultitouchIODataQueue
+
+The clientMemoryForType method of AppleUSBMultitouchUserClient creates an AppleMultitouchIODataQueue
+and maps it into kernel/user shared memory. AppleMultitouchIODataQueue inherits from IODataQueue.
+
+The memory which is mapped into userspace is represented by the variable-sized struct IODataQueueMemory:
+
+typedef struct _IODataQueueMemory {
+      UInt32 queueSize;
+      volatile UInt32 head;
+      volatile UInt32 tail;
+      IODataQueueEntry queue[1];
+} IODataQueueMemory;
+
+These queueSize, head and tail values are used to ensure that the enqueued items stay within the bounds of the queue. Userspace can modify the queueSize, head and tail values such that the kernel will try to enqueue a value to the queue outside of the allocated memory.
+
+---
+
+Interesting case.
+Looks like it wasn't fixed in OS X until Yosemite: 
+https://support.apple.com/kb/HT6535. Therefore, it can be observed:
+
+1) By declaring this in the earlier iOS patch, Apple dropped on bug on their own OS X software.
+
+2) The original report was against OS X, not iOS, so this definitely went over deadline -- by a month(!) Marking as such.
+
+CVE-2014-4418

@@ -1,0 +1,13 @@
+Issue 21:	OS X IOKit kernel memory disclosure due to lack of bounds checking in IOUSBControllerUserClient::ReadRegister
+
+This one requires local root so isn't maybe so interesting on OS X since root is still equivalent to kernel code execution anyway. It's a different story on iOS, but I don't have any iOS devices to test on (http://theiphonewiki.com/wiki/Kernel has the output of kextstat on iOS 6 and the same driver (IOUSBFamily) is listed.) I'll let Apple figure out if this is something to worry about on iOS.
+
+The IOUSBController userclient external method 8 is IOUSBControllerUserClient::ReadRegister. This method fails to bounds check its first argument which is used directly as an offset into kernel memory:
+
+mov     ecx, r15d <-- r15d controlled
+mov     eax, [rax+rcx]
+mov     [r14], eax <-- will get returned to userspace
+
+Severity Low because of the root requirement.
+
+CVE-2014-8823

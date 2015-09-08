@@ -1,0 +1,51 @@
+Issue 15:	Lack of bounds checking in notifyd
+
+notifyd is an OS X service running as root. Chrome and Safari sandboxed renderers have a mach port to talk to notifyd.
+
+The prev_slot argument of the _notify_server_regenerate MIG IPC method isn't bounds checked:
+
+notify_ipc.defs:
+
+routine _notify_server_regenerate
+(
+  server : mach_port_t;
+  name : notify_name;
+  token : int;
+  reg_type : uint32_t;
+  port : mach_port_make_send_t;
+  sig: int;
+  prev_slot: int;
+  prev_state : uint64_t;
+  prev_time : uint64_t;
+  path : notify_name;
+  path_flags: int;
+  out new_slot : int;
+  out new_name_id : uint64_t;
+  out status : int;
+  ServerAuditToken audit : audit_token_t
+);
+
+server implementation in notify_proc.c:
+
+    case NOTIFY_TYPE_MEMORY:
+    {
+      kstatus = __notify_server_register_check_2(server, name, nameCnt, token, &size, new_slot, new_nid, status, audit);
+      if (*status == NOTIFY_STATUS_OK)
+      {
+        if ((*new_slot != UINT32_MAX) && (prev_slot != UINT32_MAX) && (global.last_shm_base != NULL))                         <-- (a)
+        {
+          global.shared_memory_base[*new_slot] = global.shared_memory_base[*new_slot] + global.last_shm_base[prev_slot] - 1;  <-- (b)
+          global.last_shm_base[prev_slot] = 0;                                                                                <-- (c)
+        }
+      }
+      break;
+    }
+
+
+If global.last_shm_base is not NULL (a) then prev_slot is used as in index to read (b) and write (c). prev_slot is only checked to
+not be UINT32_MAX; it isn't validated to fall within the bounds of global.last_shm_base.
+
+global.shared_memory_base will only not be NULL if the notifyd service has restarted - I don't know under what circumstances this would
+occur, therefore severity is lower.
+
+CVE-2014-4381

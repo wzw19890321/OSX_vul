@@ -1,0 +1,20 @@
+Issue 329:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMedia::process_token_JPEGDecode
+
+IGAccelVideoContextMedia is the userclient used for GPU accelerated media decoding on the Intel HD integrated GPUs.
+It's userclient 0x101 of the IntelAccelerator IOService. IOConnectMapMemory type=0 of this userclient is a shared token buffer. Token 0x8e is JPEGDecode, implemented in IGAccelVideoContextMedia::process_token_JPEGDecode
+
+The dword at offset 0x8 of this token is used to compute the offset
+for a write without checking the bounds, allowing a controlled kernel memory write.
+
+Compile this dylib:
+  $ clang -Wall -dynamiclib -o ig_video_media_jpegdecode.dylib ig_video_media_jpegdecode.c -framework IOKit -arch i386 -arch x86_64 
+Load it into Quicktime:
+  $ DYLD_INSERT_LIBRARIES=./ig_video_media_jpegdecode.dylib /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+Go File -> Open Location and paste this link: http://movietrailers.apple.com/movies/independent/abronytale/abronytale-tlr1_480p.mov
+
+Impact:
+This userclient can be instantiated from the Chrome GPU process sandbox and the Safari renderer sandbox
+
+tested on: MacBookAir5,2 w/ 10.10.3/14D131
+
+CVE-2015-3697

@@ -1,0 +1,19 @@
+Issue 32:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMain::process_token_ColorSpaceConversion
+
+IGAccelVideoContextMain is the userclient used for GPU accelerated video encoding on the Intel HD integrated GPUs. It's userclient 0x100 of the IntelAccelerator IOService. IOConnectMapMemory type=0 of this userclient is a shared token buffer. Token 0x8a is ColorSpaceConversion, implemented in IGAccelVideoContextMain::process_token_ColorSpaceConversion
+The dword at offset 0x14 of this token is used to compute the offset for a write without checking the bounds, allowing a controlled kernel memory write.
+
+Triggering this is a bit annoying, sorry, haven't had time to make a self-contained repro for this bug yet:
+
+Compile this dylib:
+  $ clang -Wall -dynamiclib -o ig_video_main_ColorSpaceConversion.dylib ig_video_main_ColorSpaceConversion.c -framework IOKit -arch i386 -arch x86_64 
+Load it into Quicktime:
+  $ DYLD_INSERT_LIBRARIES=./ig_video_main_ColorSpaceConversion.dylib /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+Start a screen recording:
+  File -> New Screen Recording -> Click the red circle -> start the recording
+This interpose library will look for the ColorSpaceConversion token in the shared memory and trigger the bug.
+
+Impact:
+This userclient can be instantiated from the Chrome GPU process sandbox and the Safari renderer sandbox
+
+CVE-2014-4398 

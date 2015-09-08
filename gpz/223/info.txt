@@ -1,0 +1,68 @@
+Issue 223:	Flash heap buffer overflow when stringifying Proxy objects
+
+JSONClass.cpp has the following code on line 1599 which is reached via calling JSON.stringify with a controlled object:
+
+******************
+        // We were not provided with a property list via the
+        // replacer parameter; therefore we are obligated by
+        // ECMA-262 to build up an internal copy of the own
+        // propery names for value.
+
+        // Bug 652117: nextNameIndex and nextName need better
+        // documentation, both in headers and in avm2overview.
+
+        int32_t ownDynPropCount = 0;
+        int32_t index;
+
+        index = value->nextNameIndex(0);
+        while (index != 0) {
+            ownDynPropCount++;
+            index = value->nextNameIndex(index);
+        }
+
+        AutoDestructingAtomArray propNames(m_fixedmalloc, ownDynPropCount);
+
+        index = value->nextNameIndex(0);
+        int32_t propNamesIdx = 0;
+        while (index != 0) {
+            Atom name = value->nextName(index);
+            propNames.m_atoms[propNamesIdx] = name;
+            propNamesIdx++;
+            index = value->nextNameIndex(index);
+        }
+********************
+
+AutoDestructingAtomArray is defined as follows and is really just an auto-freeing wrapper around FixedMalloc::Alloc:
+
+********************
+        struct AutoDestructingAtomArray {
+            AutoDestructingAtomArray(MMgc::FixedMalloc* fm, int32_t atomCount)
+                : m_atoms(NULL)
+                , m_atomCount(atomCount)
+                , m_fixedmalloc(fm)
+            {
+                if (atomCount > 0)
+                    m_atoms = (Atom*)fm->Alloc(atomCount*sizeof(Atom));
+            }
+
+            ~AutoDestructingAtomArray() {
+                if (m_atomCount > 0)
+                    m_fixedmalloc->Free(m_atoms);
+            }
+
+            Atom*              m_atoms;
+            int32_t            m_atomCount;
+            MMgc::FixedMalloc* m_fixedmalloc;
+        };
+********************
+
+Looking back at the first snippet we can see that it enumerates all the property names of an object and counts them using ownDynPropCount. It then uses ownDynPropCount to allocate a heap buffer big enough to hold that many atoms then enumerates through the properties again to fill in the heap buffer.
+
+This code fails to take into account the semantics of the ActionScript 3 Proxy object ( http://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/utils/Proxy.html .) These Proxy objects are very powerful and allow the programmer to intercept and redefine many internal object methods, including property enumeration. By overriding the nextNameIndex and nextName methods in a Proxy subclass with custom ActionScript code we can make the apparent number of properties change between the two property enumeration loops seen here leading to a controlled heap buffer overflow.
+
+PoC attached. Tested in avmplus and the latest version of Flash Projector for OS X (16.0.0.235)
+
+build the PoC like this:
+<path_to_flex_sdk_4.6>/bin/mxmlc StringifyProxy.as
+
+CVE-2015-0327 

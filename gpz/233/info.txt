@@ -1,0 +1,9 @@
+Issue 233:	OS X sandbox escape due to heap corruption in fontd (AGSwapAttributeGroup)
+
+The fontd messages handled by the OFAHandle{Strike, Stream, General}Message functions (msgh_id values 32, 31, 33) all use an OOL descriptor to pass a user-controlled buffer. If the uint32_t in the mach message body (after the descriptor) at offset +0x10 is 0 then the OFAHandle* functions will malloc a buffer to hold a copy of the OOL descriptor data, copy the OOL data into it then pass a pointer to that malloc'ed buffer to AGSwapAttributeGroup. This function then reads a uint32_t at offset 0xc from that buffer which corresponds to the number of entries in the buffer. It never checks that this value is safe and uses it as a loop counter to swap the endianness of various parts of the buffer, leading to heap corruption.
+
+fontd is an unsandboxed daemon running as a regular user. It's reachable from various sandboxes including chrome and safari renderer processes.
+
+Attached PoC tested in OS X 10.10.1
+
+CVE-2015-1132

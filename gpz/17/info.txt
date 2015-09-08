@@ -1,0 +1,11 @@
+Issue 17:	OS X IOKit kernel code execution due to lack of bounds checking in IOAccel2DContext2::blit
+
+IOAccel2DContext2::blit is implemented in IOAcceleratorFamily2.kext - the vulnerable code can be reached from the chrome GPU process sandbox and the safari renderer sandbox.
+
+The kernel code fails to validate an index passed from userspace which is used to index an array of pointers to Surfaces.
+
+Provided a suitable structure can be constructed in kernel memory this bug can be leveraged for code execution since the code will call an attacker controller function pointer.
+
+See attached blit.c for a crashing poc.
+
+CVE-2014-1377 

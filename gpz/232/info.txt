@@ -1,0 +1,15 @@
+Issue 232:	OS X sandbox escape due to fontd trusting client-supplied pointers
+
+The bug is pretty simple - the com.apple.FontObjectsServer method with msgh_id 0x2c calls DoHandleXTURLActionMessage which
+treats the first qword in the controlled mach message payload as an objective-c object pointer. This makes no sense and
+is pretty trivial to turn into reliable arbitrary code execution.
+
+com.apple.FontObjectsServer is implemented in libATSServer.dylib which is loaded in the fontd process.
+fontd isn't sandboxed and it's reachable from most sandboxes including safari and chrome renderers.
+
+This PoC will run the shell command you give it below as a regular, unsandboxed user. Build it as a dylib
+to easily load it inside a sandboxed process to demonstrate the impact.
+
+PoC tested on Yosemite 10.10.1 - a bunch of offsets are hardcoded for that version, you will have to fix the ROP for other versions.
+
+CVE-2015-1131

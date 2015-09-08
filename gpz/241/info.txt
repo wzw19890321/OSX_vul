@@ -1,0 +1,12 @@
+
+Issue 241:	OS X sandbox escape due to multiple heap corruption bugs in fontd (FODBReviveFromDumpFile)
+
+See  issue 235  for how to reach this function with a controlled file.
+
+FODBReviveFromDumpFile performs no bounds checking when parsing complicated attacker-controlled data. I've attached PoCs for three separate bugs here but there are many many more similar issues in this function. It appears to not have been written expecting to parse attacker-controlled data.
+
+PoCs tested against OS X 10.10.2
+
+fontd is an unsandboxed daemon reachable from many sandboxes including chrome and safari renderer processes.
+
+CVE-2015-1133

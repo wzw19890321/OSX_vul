@@ -1,0 +1,17 @@
+
+Issue 328:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelGLContext::BindQueryBufferMultiple
+
+The dword at offset 0x10 of the BindQueryBufferMultiple token used by the IGAccelGLContext user client is used as the size parameter in a memory-modifying loop without any bounds checking
+
+build:
+  clang -Wall -dynamiclib -o ig_bind_qbm.dylib ig_bind_qbm.c -framework IOKit -arch i386 -arch x86_64
+
+repro:
+  DYLD_INSERT_LIBRARIES=./ig_bind_qbm.dylib  /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --single-process --no-sandbox
+
+IMPACT:
+This userclient can be instantiated in the chrome GPU process sandbox and the safari renderer sandbox.
+
+tested on: MacBookAir5,2 w/ 10.10.3/14D131
+
+CVE-2015-3695

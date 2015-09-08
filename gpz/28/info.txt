@@ -1,0 +1,27 @@
+Issue 28:	OS X IOKit kernel code execution due to lack of bounds checking in GPU command buffers
+
+The Intel GPU driver uses shared memory for drawing commands. The userspace
+client of the driver calls IOConnectMapMemory to map a shared page which it will use,
+calling selector 2 of the IOAccelerator userclient (submit_data_buffers) to signal to the driver that it should
+consume the commands (tokens) written there by the client.
+
+The first 0x10 bytes of the shared memory are some kind of header, the rest is filled with
+tokens of the form:
+
++0x00 2-byte token ID
++0x02 length of token (in 4 byte words, including this header)
++0x04 4 byte output offset??
++0x08 body of token
+..
+
+I'm still not completely sure what the 4 byte output offset field is actually for,
+but after processing all the tokens the driver calls IGAccelFIFOChannel::submitBuffer,
+and writes two words (maybe end of buffer delimiters?) using a value derived from those offset fields
+as an index and there's no bounds checking, so by specifying a large output offset for a token
+you can get this function to write the two words: 0x05000000 0x00000000 at a controlled offset.
+
+tested on: MacBookAir5,2 w/ 10.9.3/13d64
+
+(it appears to crash the GeForce driver too with what looks at first glance like a similar issue. I haven't had a chance to look at it yet but running this repro on a MacBookPro10,1 crashes in nvFermiGLContext::UpdateDrawableOffsets with an OOB write)
+
+CVE-2014-4394

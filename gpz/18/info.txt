@@ -1,0 +1,12 @@
+Issue 18:	OS X IOKit kernel memory disclosure due to lack of bounds checking in AGPMClient::getPstatesOccupancy
+
+The AGPM (AppleGraphicsPowerManagement) user client is reachable from the chrome gpu process sandbox and the safari renderer sandbox.
+
+The getPStatesOccupancy method fails to bounds check the index it's passed. The oob value which is read is then returned to the userspace caller allowing a sandboxed program to programmatically dump large amounts of kernel memory.
+
+Attached PoC leak_kmem.c will try to dump 256 kB of kernel memory to the file dump.bin.
+
+This is of course a nice kASLR defeat since you can almost certainly find all the pointers you need.
+
+On OS X another interesting attack scenario with a bug like this would be to try to read a sandbox extension - since these are just HMAC'ed strings if you could force another process to request an extension and then read it from kernel memory you could just consume it since extensions aren't tied to a particular process. I don't know how feasible it would be to read the HMAC key, if I have time I'll experiment a bit with this. (Chrome doesn't use sandbox extensions, safari does.)
+

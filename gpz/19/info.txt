@@ -1,0 +1,11 @@
+ssue 19:	OS X IOKit kernel code execution due to unchecked pointer parameter in IGAccelCLContext::unmap_user_memory
+
+The Intel OpenCL IOKit userclient has pretty much exactly the same bug as the OpenGL one - they trust a user-supplied pointer and call a virtual function off of it.
+
+Specifically the function IGAccelCLContext::unmap_user_memory is reachable as selector 0x101.
+
+Attached poc hello.c (uses the apple OpenCL hello world example to initialize OpenCL and get the correct userclient) will kernel panic dereferencing 0x4141414141414141. Compile with -framework OpenCL -framework IOKit
+
+This should be reachable from the chrome gpu process sandbox and the safari renderer sandbox.
+
+CVE-2014-1376 

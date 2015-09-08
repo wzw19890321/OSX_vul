@@ -1,0 +1,268 @@
+Issue 353:	OS X kextd bad path checking and toctou allow a regular user to load an unsigned kernel extension
+
+kextd is the userspace daemon responsible for managing OS X kernel exetension (kext) load requests.
+
+The actual kernel interface for kext loading is the kernel MiG kextmanager subsystem (ids from 70000.)
+This is exposed over the host priv port so only root can talk to it from userspace.
+
+A regular process can interact with kextd via the com.apple.KernelExtensionServer mach service.
+This is a MiG service which vends the following service we're interested in:
+
+  routine kextmanager_load_kext(
+      server                        : mach_port_t;
+      ServerAuditToken remote_creds : audit_token_t;
+      load_data                     : xmlDataIn);
+
+Before looking at that though, what do the docs say about kext loading and the restrictions that should
+be in place to stop regular users loading their own kext? There are four important restrictions:
+
+  * kext location: The kext must be under one of three subdirectories:
+                     /System/Library/Extensions/
+                     /Library/Extensions/
+                     /System/Library/Filesystems/
+
+                   These directories are owned by root:wheel and only writeable by root.
+
+  * kext permissions: The .kext bundle and all its files must also have those same permissions
+
+  * users may only request loads for kernel extensions which specify "OSBundleAllowUserLoad"
+      in their Info.plist
+
+  * all kexts must be signed; either by Apple or with an appropriate Apple Developer cert
+
+
+To load our own kext we need to bypass all of these :)
+
+Lets go back to the MiG API and take a look at how it actually works:
+
+The _kextmanager_load_kext function will be called by MiG when we send the appropriate message:
+
+  kern_return_t
+  _kextmanager_load_kext(
+      mach_port_t   server,
+      audit_token_t audit_token,
+      char        * xml_data_in,
+      int           xml_data_length)
+
+audit_token will be filled in by MiG and will contain the sending process's pid and euid. xml_data_in is the
+pointer to the controlled input.
+
+This function parses a plist from that controlled data and passes that plist dictionary to:
+
+  kextdProcessUserLoadRequest(request, remote_euid, remote_pid)
+
+This function is where we run into the first of many checks:
+
+First this function will read the value of the "KextLoadPath" key from the controlled dictionary check check
+that it begins with a '/' character. If it does then we reach a call to the first real security check function:
+
+        kextAbsURL = createAbsOrRealURLForURL(kextURL,
+            remote_euid, remote_pid, &result);
+
+Here are the relevant annotated snippets of that function:
+
+static CFURLRef createAbsOrRealURLForURL(
+    CFURLRef   anURL,
+    uid_t      remote_euid,
+    pid_t      remote_pid,
+    OSReturn * error)
+{
+
+    // ANNOT: this function doesn't actually do anything to the path
+
+    if (!CFURLGetFileSystemRepresentation(anURL, /* resolveToBase? */ TRUE,
+        (UInt8 *)urlPathCString, sizeof(urlPathCString)))
+    {
+        OSKextLog(/* kext */ NULL,
+            kOSKextLogErrorLevel | kOSKextLogLoadFlag | kOSKextLogIPCFlag,
+            "Can't get path from URL for kext load request.");
+        localError = kOSKextReturnSerialization;
+        goto finish;
+    }
+
+    if (remote_euid == 0) {
+        result = CFURLCopyAbsoluteURL(anURL);
+        if (!result) {
+            OSKextLogMemError();
+            goto finish;
+        }
+        goto finish;
+    } else {
+ 
+        // ANNOT: we reach this point if we're not root:
+        // ANNOT: this check sees if the input path begins with one of the three allowed prefixes
+        // ANNOT: urlPathCString can have ../'s in it though, so this check does nothing
+
+        inSLE = (0 == strncmp(urlPathCString, _kSystemExtensionsDirSlash,
+                              strlen(_kSystemExtensionsDirSlash)));
+        inLE = (0 == strncmp(urlPathCString, _kLibraryExtensionsDirSlash,
+                             strlen(_kLibraryExtensionsDirSlash)));
+        inSLF = (0 == strncmp(urlPathCString, _kSystemFilesystemsDirSlash,
+                              strlen(_kSystemFilesystemsDirSlash)));
+
+       /*****
+        * May want to open these checks to use OSKextGetSystemExtensionsFolderURLs().
+        * For now, keep it tight and just do /System/Library/Extensions & Filesystems.
+        */
+        if (!inSLE && !inSLF && !inLE) {
+            localError = kOSKextReturnNotPrivileged;
+            if (!inSLE && !inSLF) {
+                OSKextLog(/* kext */ NULL,
+                    kOSKextLogErrorLevel | kOSKextLogLoadFlag | kOSKextLogIPCFlag,
+                    "Request from non-root process '%s' (euid %d) to load %s - "
+                          "not in extensions dirs or filesystems folder.",
+                    nameForPID(remote_pid), remote_euid, urlPathCString);
+            }
+            goto finish;
+        }
+
+        // ANNOT: since those checks were pointless due to directory traversal this code now tries to do it
+        // ANNOT: again a bit better:
+
+        if (!realpath(urlPathCString, realpathCString)) {
+
+            localError = kOSReturnError; // xxx - should we have a filesystem error?
+            OSKextLog(/* kext */ NULL,
+                kOSKextLogErrorLevel | kOSKextLogLoadFlag | kOSKextLogIPCFlag,
+                "Unable to resolve raw path %s.", urlPathCString);
+            goto finish;
+        }
+
+        // ANNOT: at this point realpathCString is the result of passing the controlled string to realpath
+        // ANNOT: that means that all ../'s and symlinks have been resolved:
+
+       /*****
+        * Check the path once more now that we've resolved it with realpath().
+        */
+        inSLE = (0 == strncmp(realpathCString, _kSystemExtensionsDirSlash,
+                              strlen(_kSystemExtensionsDirSlash)));
+        inLE = (0 == strncmp(urlPathCString, _kLibraryExtensionsDirSlash,     // ANNOT:  BUG 1 : this is checking the wrong string!!
+                                                                              // ANNOT: presumably these should all be checking the
+                                                                              // ANNOT: realpath'd string...
+                             strlen(_kLibraryExtensionsDirSlash)));
+        inSLF = (0 == strncmp(realpathCString, _kSystemFilesystemsDirSlash,
+                              strlen(_kSystemFilesystemsDirSlash)));
+
+        if (!inSLE && !inSLF && !inLE) {
+
+            localError = kOSKextReturnNotPrivileged;
+            OSKextLog(/* kext */ NULL,
+                kOSKextLogErrorLevel | kOSKextLogLoadFlag | kOSKextLogIPCFlag,
+                "Request from non-root process '%s' (euid %d) to load %s - "
+                "(real path %s) - not in extensions dirs or filesystems folder.",
+                nameForPID(remote_pid), remote_euid, urlPathCString,
+                realpathCString);
+            goto finish;
+        }
+
+
+This function continues on and will return success if those path checks succeeded. The bug where the wrong string is passed to the
+strncmp string means that we can request a load the kext at "/Library/Extensions/../../tmp/jmp/IODVDStorageFamily.kext" and
+this function will be happy with that path, returning the realpath'd version: "/tmp/jmp/IODVDStorageFamily.kext"
+
+This bug is a fundamental issue, since now we can get the remaining kextd code to try to load a kext from a directory ("/tmp/jmp/")
+which is writable by the user.
+
+However, there are still three more important checks to bypass.
+
+kextdProcessUserLoadRequest will now continue on validating the load request, but using the "/tmp/jmp/IODVDStorageFamily.kext" path as
+the path to the kext.
+
+The createAbsOrRealURLForURL function returned the value of realpath, so right after realpath is run all the directories in the
+/tmp/jmp/IODVDStorageFamily.kext path must be real directories, but as soon as realpath has returned we can do ahead an replace
+/tmp/jmp with a symlink to /System/Library/Extensions.
+
+The fundamental issue is that from now on, the kext loading code justs uses that /tmp/jmp string to find which files to validate
+and load, and we can race them all by swapping it out for different symlinks. Nothing from this point on does any sanity checking
+on the paths. None of this should normally be an issues because we shouldn't be able to load a kext from a directory structure where
+we as a regular user can write anything, but due to  BUG 1  we can.
+
+By pointing /tmp/jmp to /System/Library/Extensions and letting the code in kextdProcessUserLoadRequest continue it will go ahead and
+verify first that the kext can be loaded as root; since the Info.plist of the real IODVDStorageFamily.kext does have OSBundleAllowUserLoad == True
+this will pass.
+
+Likewise for the signature check, it will just use the path (which contains a symlink) to create the request to pass to SecStaticCodeCheckValidity meaning that
+it's gonna check whether the real IODVDStorageFamily.kext is signed, which it of course is.
+
+We finally get to OSKextLoadWithOptions which will perform the final checks and then actually talk to the kernel to request that it loads
+the kext.
+
+The important function here is OSKextIsAuthentic; this will call __OSKextAuthenticateURLRecursively to ensure that the whole
+kext directory structure has the correct file permissions. Again, all these check just use the path with the symlink in it which still points
+/tmp/jmp to /System/Library/Extensions/ meaning that when OSKextAuthenticateURLRecursively stats and lstats /tmp/jmp/IODVDStorageFamily.kext
+and it's subdirectories its actually just checking the real IODVDStorageFamily.kext files, so of course all these check pass happily.
+
+As soon as OSKextIsAuthentic returns we need to win another race and swap the /tmp/jmp symlink to point to the directory containing our unsigned kext.
+This kext must (of course) be called IODVDStorageFamily.kext, so we could for example point /tmp/jmp to /tmp and put our unsigned kext in /tmp.
+
+This unsigned kext is of course just own by us, the regular user, but the code no longer cares, and everything is still just accessed with paths.
+
+The OSKext code will now go ahead and open and read our kext from /tmp/IODVDStorageFamily.kext and pass it to the kernel which will happily load
+it and link it for us :)
+
+Fundamentally, there are three things required to exploit this:
+
+Request a kext load for a path which starts with /Library/Extensions/../../tmp/jmp where /tmp/jmp contains a directory call IODVDStorageFamily.kext ( or
+the name of another legitimate kext which has OSBundleAllowUserLoad == True in its Info.plist)
+
+Win two races by replacing /tmp/jmp with two symlinks within small (but winnable) windows:
+
+firstly, as soon as the call to realpath has returned you must replace /tmp/jmp with a symlink to /System/Library/Extensions.
+
+secondly, as soon as OSKextIsAuthentic has returned you must replace /tmp/jmp with a symlink to the directory containing your unsigned kext, for example /tmp
+
+These race condition windows are tight but eminently winnable (they're not *that* tight, and all OS X platforms are multicore now.)
+
+For this PoC repro you will have to win the races manually by setting breakpoints in kextd to pause it at the right point. This is only for
+easy reproduction purposes, I see nothing stopping you (other than exploit dev time) winning these races.
+
+Reproduction Steps:
+Find a mac which doesn't have a DVD drive attached (or rewrite the PoC to use another not-loaded OSBundleAllowUserLoad == True kext target)
+
+Build the fake IODVDStorageFamily.kext and copy it to /tmp
+
+attach to kextd with lldb and set breakpoints at 
+[kextd is stripped so this offsets are for 10.10.3]
+ 1:  /usr/libexec/kextd+0x4203 (address of createAbsOrRealURLForURL)
+
+ 2:  OSKextIsAuthentic
+
+mkdir -p /tmp/jmp/IODVDStorageFamily.kext
+
+build and run talk_to_kextd.m which will send the load request for /Library/Extensions/../../tmp/jmp/IODVDStorageFamily.kext
+
+back in lldb you will hit breakpoint 1; do:
+
+  finish
+
+but don't continue yet; this is the point where we would in a real exploit have to replace /tmp/jmp with the symlink to /System/Library/Extensions
+so go ahead and do that in a shell:
+  rm -rf /tmp/jmp
+  ln -s /System/Library/Extensions /tmp/jmp
+
+then back in lldb do:
+
+  continue
+
+lldb will then hit breakpoint 2, in lldb do:
+
+  finish
+
+kextd will now go ahead and verify that /System/Library/Extensions/IODVDStorageFamily.kext is a signed and correctly owned kext, which it is.
+
+Once the kext has been authenticated lldb will break back at the caller of OSKextIsAuthentic.
+
+This is the point in a real exploit where we would have to replace /tmp/jmp with a symlink to /tmp,
+so do that in a shell:
+  rm -rf /tmp/jmp
+  ln -s /tmp /tmp/jmp
+
+then back in lldb do:
+
+  break delete 1 2
+  continue
+
+and kextd will continue on and pass our unsigned kext to the kernel which will happily link and load it. Look in the Console for a
+"hello from an unsigned kext loaded by a regular user" message.
+
+CVE-2015-3709 

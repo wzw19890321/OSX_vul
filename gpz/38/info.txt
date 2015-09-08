@@ -1,0 +1,24 @@
+Issue 38:	OS X IOKit kernel code execution due to integer overflow in IOBluetoothDataQueue (root only)
+
+IOBluetoothFamily implements its own queuing primitive: IOBluetoothDataQueue
+
+IOBluetoothHCIPacketLogUserClient is userclient type 1 of IOBluetoothHCIController. Its clientMemoryForType
+method uses the type argument as a length and calls IOBluetoothDataQueue::withCapacity, which in turn calls
+IOBluetoothDataQueue::initWithCapacity which uses the following code to calculate the buffer size to allocate:
+
+(r14d is controlled size)
+
+  lea     edi, [r14+100Bh] ; overflow
+  and     edi, 0FFFFF000h
+  mov     esi, 1000h
+  call    _IOMallocAligned
+
+Calling selector 0 will cause the kernel to enqueue data to the undersized queue. This selector is restricted to
+root, so this doesn't actually get you an EoP on OS X hence Severity-None.
+
+-----
+You are correct that this was fixed in Yosemite - I hadn't updated this bug as I didn't receive a direct reply to the report email but I'll update the labels now to reflect this.
+
+The root requirement does make the severity of this issue more complex; remember though that OS X does have many services which are both within a sandbox *and* run as root. For example blued is one such service responsible for interaction with the bluetooth stack. Whilst there are known public workarounds to bypass kernel code signing as root (for example by using the AppleHWAccess user client) these may not work from a sandboxed root processes.
+
+It was also possible that this particular IOKit class was used in iOS - at the time however I had no iOS setup to test that.

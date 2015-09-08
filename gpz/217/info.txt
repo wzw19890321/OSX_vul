@@ -1,0 +1,43 @@
+Issue 217:	OS X IOKit kernel code execution due to off-by-one in IOAccel2DContext::blit
+
+There's a bug in the fix for CVE-2014-1377 (https://code.google.com/p/google-security-research/issues/detail?id=17)
+
+IOAccel2DContext2::blit used to pass a user-controlled dword directly to IOAccelDisplayMachine2::getFullScreenSurface(uint)
+without first checking that it was a valid surface index - this lead quite directly to a OOB read and a subsequent
+controlled virtual function call.
+
+The fix added the following code:
+
+++ __text:00000000000018FA                 mov     ebx, [r12+0Ch] ; r12 points to user-controlled data - > ebx controlled
+++ __text:00000000000018FF                 mov     rdi, [r13+0FD0h] ; this
+++ __text:0000000000001906                 call    __ZN22IOAccelDisplayMachine219getFramebufferCountEv ; IOAccelDisplayMachine2::getFramebufferCount(void)
+++ __text:000000000000190B                 cmp     ebx, eax       ; eax contains number of valid framebuffer
+++ __text:000000000000190D                 jbe     short loc_1926 ; jump to 1926 if ebx is less than or equal to number of framebuffers
+++ __text:000000000000190F
+++ __text:000000000000190F loc_190F:                               ; CODE XREF: IOAccel2DContext2::blit(IOAccel2DBlitCommand *,ulong long)+22Ej
+++ __text:000000000000190F                                         ; IOAccel2DContext2::blit(IOAccel2DBlitCommand *,ulong long)+24Dj
+++ __text:000000000000190F                 mov     rax, [r15]      ; fail
+++ __text:0000000000001912                 mov     rdi, r15
+++ __text:0000000000001915                 call    qword ptr [rax+170h]
+++ __text:000000000000191B                 mov     r14d, 0E00002C2h
+++ __text:0000000000001921                 jmp     loc_1ACE
+++ __text:0000000000001926 ; ---------------------------------------------------------------------------
+__text:0000000000001926
+__text:0000000000001926 loc_1926:                               ; CODE XREF: IOAccel2DContext2::blit(IOAccel2DBlitCommand *,ulong long)+3A1j
+__text:0000000000001926                 mov     rdi, [r13+0FD0h] ; this
+__text:000000000000192D                 mov     esi, [r12+0Ch]  ; unsigned int - controlled value used as an offset :)
+__text:0000000000001932                 call    __ZN22IOAccelDisplayMachine220getFullScreenSurfaceEj ; IOAccelDisplayMachine2::getFullScreenSurface(uint)
+__text:0000000000001937                 test    rax, rax
+__text:000000000000193A                 jz      short loc_1945
+__text:000000000000193C
+__text:000000000000193C loc_193C:                               ; CODE XREF: IOAccel2DContext2::blit(IOAccel2DBlitCommand *,ulong long)+267j
+__text:000000000000193C                 mov     rbx, [rax+1220h] ; virtual function will later be called on rbx
+
+
+The patch added a call to IOAccelDisplayMachine2::getFramebufferCount but then uses the <= operator (jbe) to determine if the passed in index is
+valid - there's an off-by-one here, it should be '<' (jb)
+
+This lets us read one off the end of the surface array (getFullScreenSurface doesn't bounds check), in this case the value there is NULL so this PoC maps the NULL page to demonstrate exploitability.
+It might be the case that you could fill up the surface array such that reading one off the end wouldn't result in reading NULL, I haven't looked though.
+
+CVE-2015-1066

@@ -1,0 +1,24 @@
+Issue 131:	Flash write crash at NULL + 0x2b288 (on 64-bit)
+
+A PoC is attached. This is a fuzz test case so it's not immediately obvious what is going on, but it is a reliable and consistent test case on Pepper Flash Chrome (Linux x64 confirmed).
+
+When the crash triggers, this is the instruction:
+
+movb   $0x1,0x2b288(%rax)
+
+At the time of the crash %rax == 0.
+
+However, it's possible to get the address 0x2b288 mapped in modern operating systems, because "NULL mapping" protections typically only cover the first 64kb (Windows, Linux) or not at all (Mac OS X 32-bit).
+
+It's unlikely that malicious actionscript will be able to map anything so low on 64-bit, but 32-bit will be an issue.
+
+
+This bug is subject to a 90 day disclosure deadline. If 90 days elapse
+without a broadly available patch, then the bug report will automatically
+become visible to the public.
+
+Small correction regarding NULL mapping protections on OS X: the default linker options on OS X will insert a 1 page __PAGEZERO section with a fixed mapping at 0 and --- protection, so userspace dereferences of any pointer to addresses on the NULL page aren't exploitable. 0x2b288 falls well outside that and it would be application specific if it were exploitable or not.
+
+32 bit OS X processes allow native code to change the protection of that NULL page mapping at runtime and therefore exploit *kernel* NULL pointer dereferences - this is the fundamental difference to say linux whatere you need to be root to lower mmap_min_addr and exploit a kernel NULL pointer dereference.
+
+ CVE-2014-0573 

@@ -1,0 +1,139 @@
+Issue 214:	OS X IOKit kIOMapReadOnly read-only kernel shared memory bypass leading to kernel memory corruption bug in IOAccelContext2
+
+The IOAccelContext2::clientMemoryForType accepts type value from 0 to 3. The code path for type=2 sets the kIOMapReadOnly flag of the IOOptionBits reference passed as the second argument by mapClientMemory64.
+
+This flag is presumably supposed to enforce that the userspace mapping of this shared memory is read-only, and by default that is the case.
+
+I was auditing more uses of shared memory and noticed that the kernel was trusting values in this read-only shared memory and wondered how this was enforced so took a look at the code responsible for handling the kIOMapReadOnly flag:
+
+kIOMapReadOnly is used here in IOMemoryDescriptor.cpp:
+
+        IOOptionBits createOptions = 0;
+        if (!(kIOMapReadOnly & options))
+        {
+            createOptions |= kIOMemoryReferenceWrite;
+
+As you can see, the flag is only used to prevent kIOMemoryReferenceWrite from being ORed onto the createOptions. 
+
+later in IOMemoryDescriptor.cpp:
+
+    // cache mode & vm_prot
+    prot = VM_PROT_READ;
+    cacheMode = ((_flags & kIOMemoryBufferCacheMask) >> kIOMemoryBufferCacheShift);
+    prot |= vmProtForCacheMode(cacheMode);
+    // VM system requires write access to change cache mode
+    if (kIODefaultCache != cacheMode)                    prot |= VM_PROT_WRITE;
+    if (kIODirectionOut != (kIODirectionOutIn & _flags)) prot |= VM_PROT_WRITE;
+    if (kIOMemoryReferenceWrite & options)               prot |= VM_PROT_WRITE;
+
+It turns out that kIOMemoryReferenceWrite is only one of the ways to get VM_PROT_WRITE set in the eventual protection flags used for the mapping - if we can specify a non-default cache mode then the mapping will also be writable, even if kIOMapReadOnly was specified.
+
+The 6th argument to IOConnectMapMemory is an IOOptionBits, looking at IOTypes.h we can see the flags which we can pass from userspace:
+
+enum {
+    kIODefaultCache   = 0,
+    kIOInhibitCache   = 1,
+    kIOWriteThruCache   = 2,
+    kIOCopybackCache    = 3,
+    kIOWriteCombineCache  = 4,
+    kIOCopybackInnerCache = 5
+};
+
+// IOMemory mapping options
+enum {
+    kIOMapAnywhere    = 0x00000001,
+
+    kIOMapCacheMask   = 0x00000700,
+    kIOMapCacheShift    = 8,
+    kIOMapDefaultCache    = kIODefaultCache       << kIOMapCacheShift,
+    kIOMapInhibitCache    = kIOInhibitCache       << kIOMapCacheShift,
+    kIOMapWriteThruCache  = kIOWriteThruCache     << kIOMapCacheShift,
+    kIOMapCopybackCache   = kIOCopybackCache      << kIOMapCacheShift,
+    kIOMapWriteCombineCache = kIOWriteCombineCache  << kIOMapCacheShift,
+    kIOMapCopybackInnerCache  = kIOCopybackInnerCache << kIOMapCacheShift,
+
+    kIOMapUserOptionsMask = 0x00000fff,
+...
+
+mapClientMemory64 enforces the kIOMapUserOptionsMask but this still lets us specify kIOWriteThruCache. By specifying this non-default cache mode in the call to IOConnectMapMemory the read-only mapping is now writeable :)
+
+This means the following code now has a bug :) :
+
+Selector 5 of IOAccelContext2 is finish_fence_event:
+
+__text:00000000000046A0 ; __int64 __fastcall IOAccelContext2::finish_fence_event(IOAccelContext2 *__hidden this, unsigned int)
+__text:00000000000046A0                 public __ZN15IOAccelContext218finish_fence_eventEj
+__text:00000000000046A0 __ZN15IOAccelContext218finish_fence_eventEj proc near
+__text:00000000000046A0                                         ; DATA XREF: __const:000000000003C478o
+__text:00000000000046A0                 push    rbp
+__text:00000000000046A1                 mov     rbp, rsp
+__text:00000000000046A4                 push    rbx
+__text:00000000000046A5                 push    rax
+__text:00000000000046A6                 mov     rbx, rdi
+__text:00000000000046A9                 mov     ecx, [rbx+628h]
+__text:00000000000046AF                 test    ecx, ecx
+__text:00000000000046B1                 mov     eax, 0E00002C2h
+__text:00000000000046B6                 jz      short loc_46FE
+__text:00000000000046B8                 shr     ecx, 6
+__text:00000000000046BB                 cmp     ecx, esi
+__text:00000000000046BD                 jb      short loc_46FE
+__text:00000000000046BF                 mov     esi, esi
+__text:00000000000046C1                 mov     rax, [rbx+518h]
+__text:00000000000046C8                 mov     rdi, [rax+360h]
+__text:00000000000046CF                 mov     rax, [rdi]
+__text:00000000000046D2                 shl     rsi, 6
+__text:00000000000046D6                 add     rsi, [rbx+5F8h]      ; +5F8h == pointer to kernel mapping of type 2 shared mem
+__text:00000000000046DD                 call    qword ptr [rax+1B8h] ; IOAccelEventMachineFast2::finishEventUnlocked
+
+this external method takes one scalar argument which is bounds checked then added to the pointer to the type 2 shared memory. This pointer into shared memory is passed to the virtual IOAccelEventMachineFast2::finishEventUnlocked function:
+
+__text:000000000001E580 ; IOAccelEventMachineFast2::finishEventUnlocked(IOAccelEvent *)
+__text:000000000001E580                 public __ZN24IOAccelEventMachineFast219finishEventUnlockedEP12IOAccelEvent
+__text:000000000001E580 __ZN24IOAccelEventMachineFast219finishEventUnlockedEP12IOAccelEvent proc near
+__text:000000000001E580                                         ; DATA XREF: __const:0000000000042B48o
+__text:000000000001E580
+__text:000000000001E580 var_50          = qword ptr -50h
+__text:000000000001E580 var_48          = qword ptr -48h
+__text:000000000001E580 var_40          = qword ptr -40h
+__text:000000000001E580 var_38          = qword ptr -38h
+__text:000000000001E580 var_30          = qword ptr -30h
+__text:000000000001E580
+__text:000000000001E580                 push    rbp
+__text:000000000001E581                 mov     rbp, rsp
+__text:000000000001E584                 push    r15
+__text:000000000001E586                 push    r14
+__text:000000000001E588                 push    r13
+__text:000000000001E58A                 push    r12
+__text:000000000001E58C                 push    rbx
+__text:000000000001E58D                 sub     rsp, 28h
+__text:000000000001E591                 mov     [rbp+var_50], rsi ; pointer to shared mem
+__text:000000000001E595                 mov     rbx, rdi
+__text:000000000001E598                 xor     r14d, r14d
+__text:000000000001E59B                 xor     eax, eax
+__text:000000000001E59D
+__text:000000000001E59D loc_1E59D:                              ; CODE XREF: IOAccelEventMachineFast2::finishEventUnlocked(IOAccelEvent *)+EEj
+__text:000000000001E59D                 mov     r12, [rsi+r14*8]  ; reading qword from shared mem
+__text:000000000001E5A1                 cmp     r12d, 0FFFFFFFFh
+__text:000000000001E5A5                 jz      loc_1E667
+__text:000000000001E5AB                 mov     r13, r12        ; r12d = lower 32 bits of shared mem value
+__text:000000000001E5AB                                         ; r13d = upper 32 bits of shared mem value
+__text:000000000001E5AE                 shr     r13, 20h
+__text:000000000001E5B2                 movsxd  rdi, r12d
+__text:000000000001E5B5                 lea     rcx, [rdi+rdi*2]   ; rcx controlled
+__text:000000000001E5B9                 mov     edx, r13d
+__text:000000000001E5BC                 sub     edx, [rbx+rcx*4+0C8h] ; controlled read
+__text:000000000001E5C3                 test    edx, edx
+__text:000000000001E5C5                 jle     loc_1E667
+__text:000000000001E5CB                 lea     r15, [rbx+rcx*4+0C8h] ; save address of previous controlled read
+__text:000000000001E5D3                 mov     rcx, [rbx+28h]
+__text:000000000001E5D7                 mov     rcx, [rcx+rdi*8]
+__text:000000000001E5DB                 mov     edx, [rcx]
+__text:000000000001E5DD                 mov     [r15], edx            ; write a different value there
+
+As you can see, the shared memory is trusted to only contain valid indexes which are used for a series of memory reads and writes with no bounds checking.
+
+This PoC hooks IOConnectMapMemory to set the kIOWriteThruCache flag and then trigger the bug.
+
+tested on: MacBookAir5,2 w/ 10.10.1 (14B25)
+
+CVE-2014-4495 

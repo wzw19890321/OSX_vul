@@ -1,0 +1,219 @@
+These token bugs were all found via manually reversing the driver so I'll try to explain them in more detail:
+
+*** ig_video_media_avc_decode_oob_write.c ***
+
+This bug is in the function IGAccelVideoContextMedia::process_token_AVCDecode(IOAccelCommandStreamInfo &)
+in AppleIntelHD4000Graphics (function is at offset +0x1FB3A in the kext)
+
+Presumably this function has something to do with decoding this: https://en.wikipedia.org/wiki/H.264/MPEG-4_AVC
+
+This code it hit when playing an h.264/AVC file, for example this apple movie trailer should work:
+http://movietrailers.apple.com/movies/independent/abronytale/abronytale-tlr1_480p.mov
+
+(this url is actually fine for all these PoCs - load the respective interpose library into quicktime with
+DYLD_INSERT_LIBRARIES then select "Open Location" from the "File" menu and paste that url.)
+
+The pointer at offset 0x10 of the IOAccelCommandStreamInfo which is passed by reference as the argument to
+this function points into shared memory. It's the token buffer which a userclient maps using memoryType==0
+of IOConnectMapMemory on the IGAccelVideoContextMedia userclient.
+
+This token decode function will be called for a token with the token id field == 0x8c00
+
+__text:000000000001FB3A ; IGAccelVideoContextMedia::process_token_AVCDecode(IOAccelCommandStreamInfo &)
+__text:000000000001FB3A
+__text:000000000001FB3A                 push    rbp
+__text:000000000001FB3B                 mov     rbp, rsp
+__text:000000000001FB3E                 push    r15
+__text:000000000001FB40                 push    r14
+__text:000000000001FB42                 push    r13
+__text:000000000001FB44                 push    r12
+__text:000000000001FB46                 push    rbx
+__text:000000000001FB47                 sub     rsp, 28h
+__text:000000000001FB4B                 mov     [rbp+var_40], rsi     ; rsi is the pointer to the IOAccelCommandStreamInfo structure
+__text:000000000001FB4F                 mov     r15, rdi
+__text:000000000001FB52                 mov     rax, [rsi]
+__text:000000000001FB55                 mov     [rbp+var_48], rax
+__text:000000000001FB59                 mov     r14, [rsi+10h]        ; offset 0x10 is the pointer to the token buffer
+                                                                      ; r14 points to user-controlled data
+
+...
+
+further down this function there's this double-nested loop:
+(r14 hasn't changed - it still points into the token buffer)
+
+__text:000000000001FD4F                 xor     r9d, r9d
+__text:000000000001FD52                 mov     rbx, r9                   ; initialize loop counter to zero
+__text:000000000001FD55
+__text:000000000001FD55 loc_1FD55:
+__text:000000000001FD55                 mov     eax, [r14+rbx*4+900h]     ; read a dword from r14 + loop_iteration*4 + 0x900 into eax
+__text:000000000001FD5D                 lea     rdi, [r10+rax*4]          ; use that dword to compute a pointer into the buffer pointed to by r10, without
+                                                                          ; checking if it's outside the bounds (no write yet though)
+__text:000000000001FD61                 mov     rax, r12
+__text:000000000001FD64                 mov     rsi, r9
+__text:000000000001FD67
+__text:000000000001FD67 loc_1FD67:                                        ; inner loop
+__text:000000000001FD67                 mov     edx, [rax]
+__text:000000000001FD69                 shr     edx, 6
+__text:000000000001FD6C                 shl     rdx, 4
+__text:000000000001FD70                 mov     edx, [r11+rdx+4]
+__text:000000000001FD75                 or      edx, 2
+__text:000000000001FD78                 mov     [rdi+rsi*4], edx          ; write a value using rdi as the base pointer (which was computed by the lea above
+                                                                          ; at 0x1fd5d.) This is the OOB write. The value read from the token buffer at 0x1fd55
+                                                                          ; was never checked to fall within the bounds of the buffer pointed to by r10
+__text:000000000001FD7B                 add     rax, 4
+__text:000000000001FD7F                 inc     rsi
+__text:000000000001FD82                 cmp     esi, 22h ; '"'
+__text:000000000001FD85                 jnz     short loc_1FD67
+__text:000000000001FD87                 add     r12, 114h
+__text:000000000001FD8E                 inc     rbx
+__text:000000000001FD91                 cmp     ebx, r8d
+__text:000000000001FD94                 jnz     short loc_1FD55
+
+
+
+*** ig_video_media_avcpak_oob_write.c ***
+
+AVCPAK is another token type (token id == 0x8c00)
+
+__text:000000000001F726 ; IGAccelVideoContextMedia::process_token_AVCPAK(IOAccelCommandStreamInfo &)
+__text:000000000001F726
+__text:000000000001F726                 push    rbp
+__text:000000000001F727                 mov     rbp, rsp
+__text:000000000001F72A                 push    r15
+__text:000000000001F72C                 push    r14
+__text:000000000001F72E                 push    r13
+__text:000000000001F730                 push    r12
+__text:000000000001F732                 push    rbx
+__text:000000000001F733                 sub     rsp, 38h
+__text:000000000001F737                 mov     r14, rsi                  ; pointer to IOAccelCommandStreamInfo
+__text:000000000001F73A                 mov     r12, rdi
+__text:000000000001F73D                 mov     rax, [r14]
+__text:000000000001F740                 mov     [rbp+var_40], rax
+__text:000000000001F744                 mov     rbx, [r14+10h]            ; pointer to token buffer saved in rbx
+__text:000000000001F748                 mov     eax, [rbx+8]              ; setting this dword to zero skips the call to bind_resource and jumps closer to the bug
+__text:000000000001F74B                 mov     [rbp+var_44], eax
+__text:000000000001F74E                 test    eax, eax
+__text:000000000001F750                 jz      short loc_1F7C0
+
+...
+
+further down:
+
+__text:000000000001F7D4                 mov     r9d, [rbx+81Ch]           ; read dword from token buffer at offset 0x81c into r9d (r9d now attacked controlled)
+__text:000000000001F7DB                 mov     r10, [rbp+var_40]
+__text:000000000001F7DF                 lea     rsi, [r10+r9*4+34h]
+__text:000000000001F7E4                 shl     rax, 4
+__text:000000000001F7E8                 mov     eax, [rcx+rax+4]
+__text:000000000001F7EC                 and     eax, 0FFFFFFC0h
+__text:000000000001F7EF                 xor     edi, edi
+__text:000000000001F7F1                 or      eax, 2
+__text:000000000001F7F4                 mov     [r10+r9*4+1Ch], eax       ; r9 used as the offset for a memory write here without checking that it falls within
+                                                                          ; the bounds of the buffer pointed to by r10
+
+
+*** ig_video_media_avcpak_oob_write_2.c ***
+
+__text:000000000001F726 ; IGAccelVideoContextMedia::process_token_AVCPAK(IOAccelCommandStreamInfo &)
+__text:000000000001F726
+__text:000000000001F726                 push    rbp
+__text:000000000001F727                 mov     rbp, rsp
+__text:000000000001F72A                 push    r15
+__text:000000000001F72C                 push    r14
+__text:000000000001F72E                 push    r13
+__text:000000000001F730                 push    r12
+__text:000000000001F732                 push    rbx
+__text:000000000001F733                 sub     rsp, 38h
+__text:000000000001F737                 mov     r14, rsi                 ; pointer to IOAccelCommandStreamInfo
+__text:000000000001F73A                 mov     r12, rdi
+__text:000000000001F73D                 mov     rax, [r14]
+__text:000000000001F740                 mov     [rbp+var_40], rax
+__text:000000000001F744                 mov     rbx, [r14+10h]           ; save pointer to token buffer in rbx
+
+...
+
+__text:000000000001F91D                 mov     r8, rbx                  ; after this point - until the next call - r8 points to the token buffer
+
+...
+
+__text:000000000001F9CD                 mov     eax, [r8+820h]           ; read the dword at offset 0x820 into eax
+__text:000000000001F9D4                 mov     rdx, [rbp+var_40]
+__text:000000000001F9D8                 lea     rsi, [rdx+rax*4+84h]
+__text:000000000001F9E0                 mov     [rbp+var_50], rsi
+__text:000000000001F9E4                 lea     rdx, [rdx+rax*4+4]
+__text:000000000001F9E9                 mov     [rbp+var_58], rdx
+__text:000000000001F9ED                 lea     r13, [r8+239Ch]
+__text:000000000001F9F4                 lea     rbx, [r8+231Ch]
+__text:000000000001F9FB                 xor     r9d, r9d
+__text:000000000001F9FE                 lea     r11, [rax+1]             ; move that dword + 1 into r11
+
+...
+
+
+__text:000000000001FA84                 add     r15, r11                 ; add the controlled dword r11 to r15
+__text:000000000001FA87                 mov     eax, [r14+114h]
+__text:000000000001FA8E                 add     eax, [rbp+var_44]
+__text:000000000001FA91                 and     eax, 0FFFFFFFCh
+__text:000000000001FA94                 mov     rdx, [rbp+var_40]
+__text:000000000001FA98                 mov     [rdx+r15*4], eax         ; use r15 as an offset into the buffer pointed to by rdx
+
+
+
+*** ig_video_media_patch_avc_wa_oob_write.c ***
+
+__text:000000000001FB3A ; IGAccelVideoContextMedia::process_token_AVCDecode(IOAccelCommandStreamInfo &)
+__text:000000000001FB3A
+__text:000000000001FB3A                 push    rbp
+__text:000000000001FB3B                 mov     rbp, rsp
+__text:000000000001FB3E                 push    r15
+__text:000000000001FB40                 push    r14
+__text:000000000001FB42                 push    r13
+__text:000000000001FB44                 push    r12
+__text:000000000001FB46                 push    rbx
+__text:000000000001FB47                 sub     rsp, 28h
+__text:000000000001FB4B                 mov     [rbp+var_40], rsi       ; rsi points to IOAccelCommandStreamInfo
+__text:000000000001FB4F                 mov     r15, rdi
+__text:000000000001FB52                 mov     rax, [rsi]
+__text:000000000001FB55                 mov     [rbp+var_48], rax
+__text:000000000001FB59                 mov     r14, [rsi+10h]          ; save pointer to token buffer in r14
+
+...
+
+__text:000000000001FD96                 mov     eax, [r14+814h]         ; read dword at offset 0x814 in token buffer
+__text:000000000001FD9D                 lea     rdx, [r13+rax*4+0]      ; use that as an offset to compute a pointer into the buffer pointer to by r13
+                                                                        ; without checking any bounds
+                                                                        ; this pointer is passed as the uint* argument to the call to
+                                                                        ; IGAccelVideoContextMedia::patch_AVC_WA below
+__text:000000000001FDA2                 mov     rbx, r15
+__text:000000000001FDA5                 mov     rdi, rbx
+__text:000000000001FDA8                 mov     rsi, [rbp+var_40]
+__text:000000000001FDAC                 call    IGAccelVideoContextMedia::patch_AVC_WA(IOAccelCommandStreamInfo &,uint *,sIntelVideoTokenArgsWADummyJPEG *)
+
+...
+
+__text:00000000000205CE ; IGAccelVideoContextMedia::patch_AVC_WA(IOAccelCommandStreamInfo &, unsigned int *, sIntelVideoTokenArgsWADummyJPEG *)
+__text:00000000000205CE
+__text:00000000000205CE                 push    rbp
+__text:00000000000205CF                 mov     rbp, rsp
+__text:00000000000205D2                 push    r15
+__text:00000000000205D4                 push    r14
+__text:00000000000205D6                 push    r13
+__text:00000000000205D8                 push    r12
+__text:00000000000205DA                 push    rbx
+__text:00000000000205DB                 sub     rsp, 28h
+__text:00000000000205DF                 mov     r12, rcx
+__text:00000000000205E2                 mov     rbx, rdx               ; save rdx (controlled out-of-bounds pointer) to rbx
+__text:00000000000205E5                 mov     r14, rsi
+__text:00000000000205E8                 mov     r15, rdi
+__text:00000000000205EB                 mov     rax, [r15]
+__text:00000000000205EE                 mov     edx, [r12]
+__text:00000000000205F2                 mov     [rsp+50h+var_50], 1
+__text:00000000000205F9                 lea     rcx, [rbp+var_30]
+__text:00000000000205FD                 lea     r8, [rbp+var_34]
+__text:0000000000020601                 lea     r9, [rbp+var_38]
+__text:0000000000020605                 call    qword ptr [rax+0A98h]
+__text:000000000002060B                 test    al, al
+__text:000000000002060D                 jz      loc_207B6
+__text:0000000000020613                 mov     eax, [rbp+var_34]
+__text:0000000000020616                 mov     [rbx+40h], eax        ; use rbx as the base register for a memory write
+
+

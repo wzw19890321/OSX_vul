@@ -1,0 +1,16 @@
+Issue 333:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMain::process_token_AllPostProcGVA and patch_vphal_ssh_instance
+
+The function IGAccelVideoContextMain::process_token_AllPostProcGVA trusts the dword at offset 0x14 in the input token and
+adds it to a valid pointer which is then passed to ::patch_vphal_ssh_instance. This PoC should crash reading the dword at r14,
+but notice that there is possibility for memory corruption here as at the end of the loop the byte at r14 is AND'd with 0xfa allowing you to clear two bits.
+
+This PoC looks for a MediaKernel token and moves a few things around to trigger the vuln.
+
+tested on: MacBookAir5,2 w/ 10.10.3 (14D131)
+build: clang -Wall -dynamiclib -o ig_vphal_ssh.dylib ig_vphal_ssh.c -framework IOKit -arch i386 -arch x86_64
+run: DYLD_INSERT_LIBRARIES=./ig_vphal_ssh.dylib  /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+go File -> New Movie Recording and press the red record button
+
+Reachable from sandboxes which can talk the the GPU.
+
+CVE-2015-3700

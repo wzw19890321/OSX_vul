@@ -1,0 +1,123 @@
+Issue 42:	OS X IOKit kernel memory disclosure due to lack of bounds checking in IOHIKeyboardMapper::modifierSwapFilterKey
+
+By setting the HIDKeyboardModifierMappingPairs property of IOHIDKeyboard we can reach the following code in
+IOHIKeyboardMapper.cpp:
+
+  if ((array = OSDynamicCast(OSArray, dict->getObject(kIOHIDKeyboardModifierMappingPairsKey))) && (_parsedMapping.maxMod != -1))
+  {
+    UInt32 count = array->getCount();    
+    if ( count )
+    {
+      for ( unsigned i=0; i<count; i++)
+      {
+        OSDictionary *  pair      = OSDynamicCast(OSDictionary, array->getObject(i));
+        SInt32      src       = 0;
+        SInt32      dst       = 0;
+        
+        if ( !pair ) continue;
+        
+        number = OSDynamicCast(OSNumber, pair->getObject(kIOHIDKeyboardModifierMappingSrcKey));
+        
+        if ( !number ) continue;
+        
+        src = number->unsigned32BitValue();
+                
+        number = OSDynamicCast(OSNumber, pair->getObject(kIOHIDKeyboardModifierMappingDstKey));
+        
+        if ( !number ) continue;
+                
+        dst = number->unsigned32BitValue();
+        
+        ...       
+ 
+        if ((src >= NX_MODIFIERKEY_ALPHALOCK) && (src <= NX_MODIFIERKEY_RCOMMAND))
+          _modifierSwap_Modifiers[src] = dst;                                       <-- (a)
+
+This code expects an array of dictionaries, each containing two keys (IOHIDKeyboardModifierMappingSrc and
+IOHIDKeyboardModifierMappingDst) which have unsigned integer values. The purpose of this code is to allow
+swapping of modifier keys. The value dst at (a) is controlled and there is no bounds check to ensure that
+it corrisponds to a valid modifier key index.
+
+_modifierSwap_Modifiers is defined as:
+
+#define _modifierSwap_Modifiers    _reserved->modifierSwap_Modifiers
+
+where _reserved->modifierSwap_Modifiers is:
+
+        SInt32      modifierSwap_Modifiers[NX_NUMMODIFIERS];
+
+These values are read here when a modifier key is pressed:
+  bool IOHIKeyboardMapper::modifierSwapFilterKey(UInt8 * key)
+  {
+    unsigned char thisBits = _parsedMapping.keyBits[*key];
+    SInt16      modBit = (thisBits & NX_WHICHMODMASK);
+    SInt16      swapBit;
+    unsigned char *map;
+    ... 
+    swapBit = _modifierSwap_Modifiers[modBit];              <-- (b)
+    ...
+    if (((map = _parsedMapping.modDefs[swapBit]) != 0 ) &&  <-- (c)
+      ( NEXTNUM(&map, _parsedMapping.shorts) ))
+      *key = NEXTNUM(&map, _parsedMapping.shorts);          <-- (d)
+
+swapBit (read at (b)) is completely controlled and there's no bounds checking at (c) to ensure that it falls
+within the bounds of _parsedMapping.modDefs.
+
+modDefs is defined as:
+
+  unsigned char *modDefs[NX_NUMMODIFIERS];
+
+and NEXTNUM as:
+
+  static inline int NEXTNUM(unsigned char ** mapping, short shorts)
+  {
+    int returnValue;    
+    if (shorts)
+    {
+      returnValue = OSSwapBigToHostInt16(*((unsigned short *)*mapping));
+      *mapping += sizeof(unsigned short);
+    }
+    else
+    {
+      returnValue = **((unsigned char  **)mapping);
+      *mapping += sizeof(unsigned char);
+    }
+    return returnValue;
+  }
+
+Here we can see that if we can control a value at a fixed offset from modDefs it will be treated as a char* from
+which two values will be read (depening on value of _parsedMapping.shorts either bytes or shorts.) If the first
+value is non-zero then the second will be interpreted as a keycode. If it's a valid keycode then this value can
+be read by a userspace application, for example like this:
+
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSKeyDownMask
+                                          handler:
+     ^NSEvent *(NSEvent * event) {
+         printf("%02x\n", [event keyCode]);
+         return event;
+     } ];
+
+We can quite easily fake a pointer to read from at a fixed offset from modDefs by setting our own keymap
+and encoding the read target in the specialKeys, since looking at the definition of NXParsedKeyMapping
+this array of shorts is at a fixed offset from modDefs:
+
+  typedef struct _NXParsedKeyMapping_ {
+    short shorts;
+    char  keyBits[NX_NUMKEYCODES];
+    int     maxMod;
+    unsigned char *modDefs[NX_NUMMODIFIERS];
+    int     numDefs;
+    unsigned char *keyDefs[NX_NUMKEYCODES];
+    int     numSeqs;
+    unsigned char *seqDefs[NX_NUMSEQUENCES];
+    int     numSpecialKeys;
+    unsigned short specialKeys[NX_NUMSPECIALKEYS];
+    const unsigned char *mapping;
+    int mappingLen; 
+  } NXParsedKeyMapping;
+
+This PoC creates and applies such a keymap, see the code for details.
+
+By reading modified keycodes (using for example snippet above in a cocoa app) you can leak individual bytes of kernel memory.
+
+CVE-2014-4379 

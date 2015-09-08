@@ -1,0 +1,37 @@
+Issue 23:	OS X kASLR defeat using sgdt
+
+sgdt is an unprivileged instructions, a process at any privilege level
+can execute sgdt to get the address of that processor's Global Descriptor Table
+pmap.h has the following comment:
+
+/*
+ * For KASLR, we alias the master processor's IDT and GDT at fixed
+ * virtual addresses to defeat SIDT/SGDT address leakage.
+ */
+#define MASTER_IDT_ALIAS  (VM_MIN_KERNEL_ADDRESS + 0x0000)
+#define MASTER_GDT_ALIAS  (VM_MIN_KERNEL_ADDRESS + 0x1000)
+
+executing sgdt on cpu0 returns this fixed address
+the GDTs for all other cpus are allocated very early on the heap
+in cpu_data_alloc()
+
+Since the heap begins at a fixed offset from the kernel text segment
+vm_init.c contains the following comment:
+
+/*
+ * Eat a random amount of kernel_map to fuzz subsequent heap, zone and
+ * stack addresses. (With a 4K page and 9 bits of randomness, this
+ * eats at most 2M of VA from the map.)
+ */
+
+The code then uses early_random() to make a randomly-sized allocation.
+However, since the granularity of kASLR is 2MB, if a suitably early
+kernel heap allocation address can be leaked then it's enough to guess
+the kASLR offset reasonably reliably (in testing at least 50% correct)
+
+The GDT allocations are suitably early and the state of the heap sufficiently
+deterministic that by executing sgdt on all cpus and filtering out the result
+for cpu0 you can with at least 50% reliability determine the kASLR slide
+
+PoC attached.
+CVE-2014-4403 

@@ -1,0 +1,48 @@
+Issue 130:	OS X networkd "effective_audit_token" XPC type confusion sandbox escape (with exploit)
+
+networkd is the system daemon which implements the com.apple.networkd XPC service. It's unsandboxed but runs as its own user. com.apple.networkd is reachable from many sandboxes including the Safari WebProcess and ntpd (plus all those which allow system-network.)
+
+networkd parses quite complicated XPC messages and there are many cases where xpc_dictionary_get_value and xpc_array_get_value are used without subsequent checking of the type of the returned value.
+
+An XPC message with the following keys and values will reach the function at offset 0x7421 in networkd:
+
+exploit dict = {
+  “type” = 6,
+  “connection_id” = 1,
+  “state” = {
+    “power_slot”: 0	
+  },
+  “parameters” = {
+    “duration” = 0,
+    “start” = 0,
+    “connection entry list” = [
+      {
+        “hostname”: “example.com”
+      }
+    ],
+  "effective_audit_token" = "type not checked",
+  }
+}
+
+Here's the code reading "effective_audit_token":
+
+__text:00000001000075E5                 lea     r14, off_1000177D8 ;"effective_audit_token"
+__text:00000001000075EC                 mov     rsi, [r14]
+__text:00000001000075EF                 mov     rdi, r13
+__text:00000001000075F2                 call    _xpc_dictionary_get_value ; (a)
+__text:00000001000075F7                 xor     r12d, r12d
+__text:00000001000075FA                 test    rax, rax
+__text:00000001000075FD                 jz      short loc_10000763A ; (b)
+__text:00000001000075FF                 mov     rsi, [r14]
+__text:0000000100007602                 mov     rdi, r13
+__text:0000000100007605                 call    _xpc_dictionary_get_value ; (c)
+__text:000000010000760A                 mov     rdi, rax
+__text:000000010000760D                 call    _xpc_data_get_bytes_ptr ; (d)
+
+At (a) and (b) the code checks if there is any value in the parameters dictionary with the key "effective_audit_token". If there is then at (c) it reads that value again and at (d) uses it as an xpc_data object by passing it to xpc_data_get_bytes_ptr. There is no check that "effective_audit_token" really was an xpc_data object.
+
+See https://code.google.com/p/google-security-research/issues/detail?id=121 for details of how to exploit such a type-confusion.
+
+Attached PoC exploits this bug to run a shell command as networkd. Only tested on 10.9.5 - there are hardcoded offsets in the PoC which might have to be fixed up for other versions, sorry!
+
+CVE-2014-4492 

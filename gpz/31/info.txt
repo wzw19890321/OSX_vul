@@ -1,0 +1,13 @@
+Issue 31:	OS X IOKit kernel code execution due to NULL pointer dereference in IOAccelContext2::clientMemoryForType
+
+Calling IOConnectMapMemory with type=0 of userclient 0x100 of IOService "IntelAccelerator" hits the following exploitable kernel NULL pointer dereference:
+
+ mov rdi, [r12+1D8h]      ; rdi := NULL
+ mov rax, [rdi]           ; read vtable pointer from NULL
+ call qword ptr [rax+20h] ; controlled call
+
+See attached PoC which maps the NULL page and kernel panics calling a virtual function near 0x4141414141414141.
+
+This userclient is reachable from the chrome GPU process sandbox and the safari renderer sandbox.
+
+CVE-2014-4376 

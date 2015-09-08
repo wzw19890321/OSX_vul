@@ -1,0 +1,15 @@
+Issue 334:	OS X IOKit kernel code execution due to use of IOAccelSurface2::convertGLIndexToBufferIndex error code return value as buffer index
+
+The function IOAccelSurface2::convertGLIndexToBufferIndex converts an eIOAccelGLBufferType enum value to a surface buffer index.
+If convertGLIndexToBufferIndex is passed an invalid enum value it returns 0xffff, however no call sites actually check the return value and blindly pass it to IGAccelGLContext::getSurfaceBuffer which will use the index to read an object pointer out-of-bounds and then call a virtual function.
+
+This PoC modifies the BindDepthBuffer token to overwrite the value at offset +8 which is passed to convertGLIndexToBufferIndex.
+
+It may be necessary to run the PoC a few times to hit the crash, since if the OOB value is NULL or the field at +40 of the read pointer is NULL then this will just hit an error path and not crash.
+
+tested on: MacBookAir5,2 w/ 10.10.3 (14D131)
+build: clang -Wall -dynamiclib -o ig_convertGLIndex.dylib ig_convertGLIndex.c -framework IOKit -arch i386 -arch x86_64
+run: DYLD_INSERT_LIBRARIES=./ig_convertGLIndex.dylib /Applications/Chess.app/Contents/MacOS/Chess
+note: because of the nature of the heap oob read you may have to run the repro a few times to hit a bad value
+
+CVE-2015-3701

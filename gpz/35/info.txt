@@ -1,0 +1,31 @@
+Issue 35:	OS X IOKit kernel code execution due to controlled kmem_free size in IOSharedDataQueue
+
+IOSharedDataQueue is used by OS X kernel drivers to implement a user/kernel queue in shared memory.
+
+The memory which is mapped into userspace is represented by the variable-sized struct IODataQueueMemory:
+
+typedef struct _IODataQueueMemory {
+      UInt32 queueSize;
+      volatile UInt32 head;
+      volatile UInt32 tail;
+      IODataQueueEntry queue[1];
+} IODataQueueMemory;
+
+This is allocated on the kernel heap with IOMallocAligned (the size is rounded up to the nearest page_size multiple.) This size is stored in the queueSize field.
+
+Kernel code can call IOSharedDataQueue::getMemoryDescriptor to wrap these pages in an IOMemoryDescriptor which can then be mapped into the userspace task (via IOConnectMapMemory.)
+
+When the IOSharedDataQueue is destructed its ::free method passes the queueSize to kmem_free, which simply removes the corresponding number of pages from the kernel_map. If userspace increased the value of the queueSize field this will remove more pages than were allocated - potentially removing other live allocations from the map.
+
+This could be leveraged for code execution by, for example, forcing these free pages to be reallocated with controlled data before they are accessed.
+
+[[ Note that due to the nature of this bug this PoC will crash in weird ways - break at IODataQueue::free to see the bad size]]
+
+--
+
+Apple requested more details. I replied with another explanation of the bug and more information about how the PoC will kernel panic, and that any kernel panic will look strange depending on what happened to be in memory contiguous with the IODataQueueMemory. I asked for clarification as to whether they cannot reproduce the kernel panic at all or are just having trouble diagnosing it.
+
+http://googleprojectzero.blogspot.com/2014/10/more-mac-os-x-and-iphone-sandbox.html implies this should be labeled as fixed with:
+CVE-2014-4418 [ https://code.google.com/p/google-security-research/issues/detail?id=36 ]
+No CVE* [ https://code.google.com/p/google-security-research/issues/detail?id=35 ]
+were bugs

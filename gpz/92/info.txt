@@ -1,0 +1,49 @@
+Issue 92:	OS X sandbox escape due to XPC type confusion in networkd
+
+com.apple.networkd is an xpc service reachable from many OS X sandboxes (via (system-network).)
+
+It runs unsandboxed but as the user _networkd, this doesn't prevent it from being a valid sandbox escape as getting code execution
+as _networkd gives access to a much bigger kernel attack surface.
+
+The com.apple.networkd service parses many very complicated xpc messages and there are multiple type confusions bugs.
+
+This PoC is a trigger for one of them which I'm pretty sure can actually be exploited to get code execution:
+
+(_networkd has no symbols so these functions names are the addresses in the _networkd binary on 10.9.4)
+
+__text:0000000100007421 sub_10000742
+...
+__text:00000001000074BD                 call    _xpc_array_get_value    ; return value not type-checked
+__text:00000001000074C2                 mov     rdi, rax
+__text:00000001000074C5                 call    sub_1000072CE           ; passed as first arg to sub_1000072CE
+
+
+__text:00000001000072CE sub_1000072CE
+...
+__text:00000001000072F7                 lea     rax, off_100017668         ; "connect_by"
+__text:00000001000072FE                 mov     rsi, [rax]
+__text:0000000100007301                 call    _xpc_dictionary_get_uint64 ; rdi has never been checked to be an xpc dictionary
+...
+__text:00000001000073B7                 cmp     rax, 3                     ; if "connect_by" == 3
+__text:00000001000073BB                 jnz     short loc_100007401
+__text:00000001000073BD                 mov     [rbp+var_80], 0
+__text:00000001000073C5                 lea     rax, off_100017768         ; "sockaddr"
+__text:00000001000073CC                 mov     rsi, [rax]
+__text:00000001000073CF                 lea     rdx, [rbp+var_80]
+__text:00000001000073D3                 mov     rdi, rbx
+__text:00000001000073D6                 call    _xpc_dictionary_get_data   ; same rdi, not checked to be a dictionary
+
+xpc_dictionary_get_data will look up the key "sockaddr", check that the value matching that key is an OS_xpc_data object and then call
+xpc_data_get_bytes_pointer. By crafting a fake xpc_dictionary (for example by passing an xpc_int64 as the value in the array then grooming
+controlled data where the dictionary expects to find its hash bucket pointers) we can gain complete control of this xpc_data pointer (and
+are also able to then set the type field correctly.)
+
+xpc_data_get_bytes_pointer will call xpc_map_data_once which will pass the pointer at offset +0x30 of the fake xpc_data object to dispatch_data_create_map
+and then dispatch_release. By crafting this dispatch object such that it can't be correctly mapped (eg by setting +0x28 to 0) this dispatch object won't be retained
+such that when it's passed to disptach_release (with the retain count set to 0) it will be released and an objective-c method will be invoked.
+
+Actually doing that heap grooming is a pain, but I'm quite sure it's possible :-)
+
+I've included some ideas for fixing all these bugs by added extra checks in libxpc in the report sent to Apple.
+
+CVE-2014-4492 

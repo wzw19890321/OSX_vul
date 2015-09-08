@@ -1,0 +1,23 @@
+Issue 263:	OS X sandbox escape due to heap corruption in fontd (com.apple.FontServer - GetUncompressedBitmapRepresentationData)
+
+The second service which fontd hosts is com.apple.FontServer. Unlike com.apple.FontObjectsServer (see previous bugs) FontServer is built using MIG.
+
+Many of the MIG methods take a serialized CoreFoundation object which is passed as an OOL region. FontServer uses a custom serialization algorithm
+implemented in the TCFResurrectContext class.
+
+The MIG method _XUnregisterFonts is an example method which will try to deserialize a CFArray from the OOL region. Since CFArrays can contain any types
+we can use this path to hit all the other deserializers implemented by TCFResurrectContext.
+
+The implementation of the CFCharacterSet deserializer read a dword length then passes that many bytes (via a CFData object) to the function
+XTCopyUncompressedBitmapRepresentation. This function reads a size dword at offset 0x4 in the input buffer and mallocs an output buffer
+that size which is then passed, along with a pointer to the controlled input, to GetUncompressedBitmapRepresentationData.
+
+This function implements something a bit like run-length decompression, except the repeated regions can only be runs of 0xff or 0x00. This function
+performs insufficient bounds checking, specifically it never checks the bounds of the output buffer it is writing to, only that it doesn't read off the end
+of the input, leading trivially to controllable heap corruption.
+
+fontd runs unsandboxed as a regular user; the com.apple.FontServer service is reachable from many sandboxes including Safari and Chrome renderer processes.
+
+PoC tested on OS X 10.10.2
+
+CVE-2015-1134

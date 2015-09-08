@@ -1,0 +1,50 @@
+Issue 39:	OS X IOKit kernel code execution due to integer overflow in IODataQueue::enqueue
+
+The class IODataQueue is used in various places in the kernel. There are a couple of exploitable integer overflow issues in the ::enqueue method:
+
+Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
+{
+  const UInt32       head      = dataQueue->head;  // volatile
+  const UInt32       tail      = dataQueue->tail;
+  const UInt32       entrySize = dataSize + DATA_QUEUE_ENTRY_HEADER_SIZE;  <-- (a)
+  IODataQueueEntry * entry;
+
+  if ( tail >= head )
+  {
+    // Is there enough room at the end for the entry?
+    if ( (tail + entrySize) <= dataQueue->queueSize )                      <-- (b)
+    {
+      entry = (IODataQueueEntry *)((UInt8 *)dataQueue->queue + tail);
+
+      entry->size = dataSize;
+      memcpy(&entry->data, data, dataSize);                                <-- (c)
+
+
+The additions at (a) and (b) should be checked for overflow. In both cases, by supplying a large value for dataSize an attacker can reach the memcpy call at (c) with a length argument which is larger than the remaining space in the queue buffer.
+
+The majority of this PoC involves setting up the conditions to actually be able to reach a call to ::enqueue with a controlled dataSize argument, the bug itself it quite simple.
+
+This PoC creates an IOHIDLibUserClient (IOHIDPointingDevice) and calls the create_queue externalMethod to create an IOHIDEventQueue (which inherits from IODataQueue.) This is the queue which will have the ::enqueue method invoked with the large dataSize argument.
+
+The PoC then calls IOConnectMapMemory with a memoryType argument of 0 which maps an array of IOHIDElementValues into userspace:
+
+typedef struct _IOHIDElementValue
+{
+  IOHIDElementCookie  cookie;
+  UInt32        totalSize;
+  AbsoluteTime    timestamp;
+  UInt32        generation;
+  UInt32        value[1];
+}IOHIDElementValue;
+
+The first dword of the mapped memory is a cookie value and the second is a size.
+
+When the IOHIDElementPrivate::processReport method is invoked (in response to an HID event) if there are any listening queues then the IOHIDElementValue will be enqueued - and the size is in shared memory :-)
+
+The PoC calls the startQueue selector to start the listening queue then calls addElementToQueue passing the cookie for the first IOHIDElementValue and the ID of the listening queue.
+
+A loop then overwrites the totalSize field of the IOHIDElementValue in shared memory with 0xfffffffe. When the processReport method is called this will call IODataQueue::enqueue and overflow the calculation of entry size such that it will attempt to memcpy 0xfffffffe bytes. Note that the size of the queue buffer is also attacked controlled, and the kernel is 64-bit, so a 4gb memcpy is almost certainly exploitable.
+
+Note that lldb seems to get confused by the crash - the memcpy implementation uses rep movsq and lldb doesn't seem to understand the 0xf3 (rep) prefix - IDA disassembles the function fine though. Also the symbols for memcpy and real_mode_bootstrap_end seem to have the same address so the lldb backtrace looks weird, but it is actually memcpy.
+
+CVE-2014-4389

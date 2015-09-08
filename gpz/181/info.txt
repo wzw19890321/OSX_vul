@@ -1,0 +1,7 @@
+Issue 181:	OS X IOKit EoP due to lack of bounds checking in Intel GPU driver
+
+The first body dword of the token type 0x8e (BindTextures) of the Intel HD GL driver (IGAccelGLContext) is used in the function IGAccelGLContext::process_token_BindTextures to index an array of IOAccelResource2 pointers without validating that the index is valid.
+
+By passing an invalid index we can force this function to read an IOAccelResource2 pointer out of bounds and pass it to IOAccelContext2::unbindResource which will call a virtual method on the invalid pointer.
+
+CVE-2014-8819

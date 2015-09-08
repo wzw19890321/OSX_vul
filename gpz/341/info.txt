@@ -1,0 +1,14 @@
+Issue 341:	OS X IOKit kernel code execution due to insufficient bounds checking in nvidia GeForce command buffer processing
+
+The dword at offset +0x78 of token type 0x8900 of the nvidia GeForce GLContext command buffer is used to compute the offset for a kernel memory write with insufficient bounds checking.
+
+tested on: MacBookPro10,1 w/ 10.10.3 (14D131)
+
+build: clang -Wall -dynamiclib -o nv_alloclist.dylib nv_alloclist.c  -framework IOKit -arch i386 -arch x86_64
+run: DYLD_INSERT_LIBRARIES=./nv_alloclist.dylib /Applications/Google\ Chrome\ Canary.app/Contents/MacOS/Google\ Chrome\ Canary --single-process --force_discrete_gpu "http://interactivehaiku.com/lifeisshort/"
+
+note: --force_discrete_gpu will force chrome to use the nvidia gpu rather than the intel integrated one.
+
+Reachable from sandboxes which allow GPU access.
+
+CVE-2015-3712 

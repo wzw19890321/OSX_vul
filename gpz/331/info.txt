@@ -1,0 +1,14 @@
+Issue 331:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMain::process_token_JPEGBLF
+
+The function IGAccelVideoContextMain::process_token_JPEGBLF trusts the dword at offset 0x14 in the input token and uses it as the index for a kernel memory write.
+
+This PoC looks for a MediaKernel token and moves a few things around to trigger the vuln in the JPEGBLF code.
+
+tested on: MacBookAir5,2 w/ 10.10.3 (14D131)
+build: clang -Wall -dynamiclib -o ig_JPEGBLF.dylib ig_JPEGBLF.c -framework IOKit -arch i386 -arch x86_64
+run: DYLD_INSERT_LIBRARIES=./ig_JPEGBLF.dylib  /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+go File -> New Movie Recording and press the red record button
+
+Reachable from sandboxes which can talk to the GPU (eg chrome GPU process and safari renderer process.)
+
+CVE-2015-3698 

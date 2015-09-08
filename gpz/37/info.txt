@@ -1,0 +1,10 @@
+Issue 37:	OS X IOKit kernel code execution due to bad free in IOBluetoothFamily
+
+IOBluetoothFamily implements its own queuing primitive: IOBluetoothDataQueue (doesn't appear to inherit from IODataQueue, but I could be wrong about that?)
+
+IOBluetoothHCIPacketLogUserClient is userclient type 1 of IOBluetoothHCIController.
+
+The IOBluetoothDataQueue free method uses the queue size field which was mapped into userspace
+when freeing the queue - a userspace client can modify this field forcing a bad kmem_free.
+
+CVE-2014-4390 

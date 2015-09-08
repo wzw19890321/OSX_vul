@@ -1,0 +1,7 @@
+Issue 24:	OS X IOKit kernel code execution due to NULL pointer dereference in IOThunderboltFamily
+
+IOThunderboltFamilyUserClient::xDomainRequestAction doesn't verify that a pointer is non-NULL before calling a virtual function, giving trivial kernel RIP control if the user process maps the NULL page, as this PoC demonstrates.
+
+IOThunderboltFamilyUserClient::xDomainRequestAction is called by IOThunderboltFamilyUserClient::xDomainRequest which is selector 13 of IOThunderboltController
+
+This bug appears to have been fixed, though I wasn't notified. I've emailed Apple to find out if it was a collision with an internal find or not.

@@ -1,0 +1,7 @@
+Issue 182:	OS X IOKit EoP due to lack of bounds checking in Intel GPU driver (IOAccelResource2::dirtyLevel)
+
+The Intel HD GPU driver function IGAccelGLContext::process_token_BindDrawFBOColor parses the token with ID 0x9100. The dword at offset 0x14 in the token is passed to IOAccelResource2::dirtyLevel where it's used to computed an index for a memory write (OR'ing the low bit of a dword with 1) with no bounds checking.
+
+PoC attached.
+
+CVE-2014-8821

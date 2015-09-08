@@ -1,0 +1,14 @@
+Issue 332:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMain::process_token_AllPostProcGVA
+
+The function IGAccelVideoContextMain::process_token_AllPostProcGVA trusts the dword at offset 0x10 in the input token and uses it as the index for a kernel memory write. (It adds it to a valid pointer which gets passed into patch_vphal_dndi_curbe where the write actually happens.)
+
+This PoC looks for a MediaKernel token and moves a few things around to trigger the vuln in the AllPostProcGVA code.
+
+tested on: MacBookAir5,2 w/ 10.10.3 (14D131)
+build: clang -Wall -dynamiclib -o ig_GVA.dylib ig_GVA.c -framework IOKit -arch i386 -arch x86_64
+run: DYLD_INSERT_LIBRARIES=./ig_GVA.dylib  /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+go File -> New Movie Recording and press the red record button
+
+Reachable from sandboxes which can talk the the GPU.
+
+CVE-2015-3699

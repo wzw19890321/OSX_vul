@@ -1,0 +1,20 @@
+Issue 327:	OS X IOKit kernel code execution due to lack of bounds checking in IGAccelVideoContextMain::patch_encoding_common
+
+IGAccelVideoContextMain is the userclient used for GPU accelerated video encoding on the Intel HD integrated GPUs.
+It's userclient 0x100 of the IntelAccelerator IOService. IOConnectMapMemory type=0 of this userclient is a shared token buffer.
+The dword at offset 0x14 of token 0x83 is used to compute the offset
+for a write without checking the bounds, allowing a controlled kernel memory write.
+
+This PoC uses quicktime but the vuln is reachable from the Chrome GPU process sandbox and the safari sandbox.
+
+Compile this dylib:
+  $ clang -Wall -dynamiclib -o ig_video_main_patch_encoding_common.dylib ig_video_main_patch_encoding_common.c -framework IOKit -arch i386 -arch x86_64 
+Load it into Quicktime:
+  $ DYLD_INSERT_LIBRARIES=./ig_video_main_patch_encoding_common.dylib /Applications/QuickTime\ Player.app/Contents/MacOS/QuickTime\ Player
+Start a screen recording:
+  File -> New Movie Recording -> Click the red circle -> start the recording
+This interpose library will look for the ColorSpaceConversion token in the shared memory and trigger the bug.
+
+tested on: MacBookAir5,2 w/ 10.10.3/14d131
+
+CVE-2015-3696

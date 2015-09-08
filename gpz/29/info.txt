@@ -1,0 +1,34 @@
+Issue 29:	OS X IOKit kernel code execution due to off-by-one error in IGAccelGLContext::processSidebandToken
+
+The Intel GPU driver uses shared memory for drawing commands. The userspace
+client of the driver calls IOConnectMapMemory to map a shared page which it will use,
+calling selector 2 (submit_data_buffers) to signal to the driver that it should
+consume the commands (tokens) written there by the client.
+
+The function IGAccelGLContext::processSidebandToken checks the token ID and length then
+jumps to the function responsible for actually parsing the token:
+
+; IGAccelGLContext::processSidebandToken(IOAccelCommandStreamInfo &)
+       push    rbp
+       mov     rbp, rsp
+       mov     ax, [rsi+18h]   ; this is the token id
+       test    ax, ax
+       jns     short not_us    ; jump if not sign - token must be >= 0x8000
+       cmp     ax, 0A1FFh   
+       ja      short err       ; jump if token > 0xa1ff
+       movzx   ecx, ax         ; otherwise, take the upper 8 bits, subtract 0x80 and use as an index into s_cTokenInfo array of token function descriptors
+       mov     r8, [rdi+1090h] ; 
+       shr     ecx, 8
+       add     ecx, 0FFFFFF80h
+       lea     rcx, [rcx+rcx*2]
+       mov     edx, [r8+rcx*8+10h] ; get pointer to descriptor
+
+s_cTokenInfo points to an array of 0x21 descriptors (each 0x18 bytes) therefore the maximum index allowed should be 0x20. Supplying a token
+with a token id field of 0xa100 will read a descriptor off the end of the s_cTokenInfo array. The bytes following the array happen to be zero, which means
+that the code will reach a jmp rax where rax is zero.
+
+Exploitability depends on two things: being able to map the zero page and being able to execute it - mapping the zero page is possible (see previous
+bug reports) but SMEP (Supervisor Mode Execution Prevention) will stop exploitation of this for Ivy Bridge and newer cpus. On Sandy Bridge and older hardware
+this bug will be exploitable (eg MacBookPro <= 8,3 which so far as I understand is still completely supported hardware.)
+
+CVE-2014-4395 

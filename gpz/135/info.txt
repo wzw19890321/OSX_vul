@@ -1,0 +1,12 @@
+Issue 135:	OS X IOKit kernel code execution due to NULL pointer dereference in IntelAccelerator
+
+I wrote a little program to run over every IOKit IOService userclient type from 1 to 100 and just call IOConnectMapMemory for all the memory type values from 1 to 1000.
+
+Calling IOConnectMapMemory on userclient type 2 of "IntelAccelerator" with memory type 3 hits an exploitable kernel NULL pointer dereference calling a virtual function on an object at 0x0.
+
+Attached PoC exploits this to get root.
+
+(The cleanup ROP uses a hardcoded offset for 10.9.5.)
+
+
+http://support.apple.com/en-us/HT204245 cve-2014-4486

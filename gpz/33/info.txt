@@ -1,0 +1,10 @@
+Issue 33:	OS X IOKit kernel code execution due to lack of bounds checking in IOAccelDisplayPipeTransaction2::set_plane_gamma_table
+
+IOAccelDisplayPipe2::transaction_set_plane_gamma_table fails to verify the second dword of IOAccelDisplayPipeGammaTableArgs which can be controlled by calling the external method with selector 5 of IOAccelDisplayPipeUserClient2.
+
+This unchecked dword is passed to IOAccelDisplayPipeTransaction2::set_plane_gamma_table where it is used as an index to read a pointer to a c++ object from an array. By specifying a large index this will read a c++ object pointer out-of-bounds. The code then calls a virtual function on this object.
+
+Impact:
+This userclient can be instantiated in the chrome GPU process sandbox and the safari renderer sandbox.
+
+ CVE-2014-4402 
