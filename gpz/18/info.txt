@@ -10,3 +10,5 @@ This is of course a nice kASLR defeat since you can almost certainly find all th
 
 On OS X another interesting attack scenario with a bug like this would be to try to read a sandbox extension - since these are just HMAC'ed strings if you could force another process to request an extension and then read it from kernel memory you could just consume it since extensions aren't tied to a particular process. I don't know how feasible it would be to read the HMAC key, if I have time I'll experiment a bit with this. (Chrome doesn't use sandbox extensions, safari does.)
 
+CVE-2014-1372 
+
