@@ -1,0 +1,3 @@
+Issue 607:	iOS kernel UaF in AppleOscarAccelerometer
+
+CVE-2016-1719

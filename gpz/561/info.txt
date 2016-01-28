@@ -1,0 +1,11 @@
+Issue 561:	IOKit doesn't correctly handle spoofed no-more-senders notifications leading to many bugs (OS X and iOS)
+
+A spoofed no-more-senders notification leads to a call to ::clientClosed when there actually are still
+clients. What happens then depends on the userClient's implementation of clientClosed; in this
+particular case (with userclient type 0 of IntelAccelerator) we hit an exploitable NULL deref
+(this should panic reading from 414141414141414141 (note that that address had been read from the NULL page.)
+
+I imagine there are *far* more bugs here!
+
+Status: Duplicate 
+Mergedinto: 553 

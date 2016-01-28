@@ -1,0 +1,44 @@
+Issue 429:	Integer signedness and overflow issues in OS X regex engine (TRE)
+
+The OS X regex engine function tre_tnfa_run_parallel contains the following code:
+
+  int tbytes;
+...
+  if (!match_tags)
+    num_tags = 0;
+  else
+    num_tags = tnfa->num_tags;
+
+...
+  {
+    int rbytes, pbytes, total_bytes;
+    char *tmp_buf;
+    /* Compute the length of the block we need. */
+    tbytes = sizeof(*tmp_tags) * num_tags;
+    rbytes = sizeof(*reach_next) * (tnfa->num_states + 1);
+    pbytes = sizeof(*reach_pos) * tnfa->num_states;
+    total_bytes =
+      (sizeof(long) - 1) * 4 /* for alignment paddings */
+      + (rbytes + tbytes * tnfa->num_states) * 2 + tbytes + pbytes;
+
+    DPRINT(("tre_tnfa_run_parallel, allocate %d bytes\n", total_bytes));
+    /* Allocate the memory. */
+#ifdef TRE_USE_ALLOCA
+    buf = alloca(total_bytes);
+#else /* !TRE_USE_ALLOCA */
+    buf = xmalloc((unsigned)total_bytes);  <-- malloc is called, not alloca
+#endif /* !TRE_USE_ALLOCA */
+    if (buf == NULL)
+      return REG_ESPACE;
+    memset(buf, 0, (size_t)total_bytes);
+
+
+num_states and num_tags are computed based on the requirements of the regex and it's quite easy to make them each >64k with a relatively small regex. Note that total_bytes is an int and part of its calculation is the product of num_states and num_tags.
+
+The types here are all over the place and there's conversion between int, unsigned's and size_t.
+
+The attached PoC causes total_bytes to become negative leading to total_bytes being sign-extended in the memset call.
+
+Severity medium because I haven't looked for exposed attack surface yet, but this doesn't require any non-standard flags (only REG_EXTENDED which is almost always used.)
+
+CVE-2015-3798

@@ -1,0 +1,16 @@
+Issue 572:	Spoofed no-more-senders notifications with IOBluetoothHCIPacketLogUserClient leads to unsafe parallel OSArray manipulation
+
+The OS* data types (OSArray etc) are explicity not thread safe; they rely on their callers to implement the required locking
+to serialize all accesses and manipulations of them. By sending two spoofed no-more-senders notifications on two threads at the
+same time we can cause parallel calls to OSArray::removeObject with no locks which is unsafe. In this particular case you might see two threads
+both passing the index >= count check in OSArray::removeObject (when count = 1 and index = 0) but then both decrementing count leading to an OSArray with
+a count of 0xffffffff leading to memory corruption when trying to shift the array contents.
+
+repro: while true; do ./iospoof_bluepacketlog; done
+
+Tested on OS X 10.11 ElCapitan (15A284) on MacBookAir 5,2
+
+This bug was fixed as part of the fixed for CVE-2015-7047 so dup'ing into that issue
+
+Status: Duplicate 
+Mergedinto: 553 

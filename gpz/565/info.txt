@@ -1,0 +1,14 @@
+Issue 565:	OS X Kernel UaF with IOAccelDisplayPipeUserClient2 with spoofed no more senders notifications
+
+Kernel UaF with IOAccelDisplayPipeUserClient2 with spoofed no more senders notifications
+
+repro: while true; do ./iospoof_ig_4; done
+
+Likely to crash in various ways; have observed NULL derefs and NX traps.
+
+Tested on ElCapitan 10.11 (15a284) on MacBookAir 5,2
+
+This bug was fixed as part of the fixed for CVE-2015-7047 so dup'ing into that issue
+
+Status: Duplicate 
+Mergedinto: 553 

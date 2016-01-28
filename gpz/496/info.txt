@@ -1,0 +1,25 @@
+Issue 496:	OS X kernel panic due to bad patch for CVE-2015-3712 in GeForce.kext
+
+ bug 341  (CVE-2015-3712) was due to the nvidia kernel driver trusting values in user/kernel shared memory when manipulating nvidia "AllocationLists."
+
+The patch for this bug added a few functions like "SanityCheckAllocationList" and "SanityCheckAllocationListHeader". Unfortunately these functions just use a *different* value from shared memory when trying to check the allocations lists leading to an immediate OOB read:
+
+nvGLContext::SanityCheckAllocationList():
+0000000000026b1a        pushq   %rbp
+0000000000026b1b        movq    %rsp, %rbp
+0000000000026b1e        pushq   %r15
+0000000000026b20        pushq   %r14
+0000000000026b22        pushq   %rbx
+0000000000026b23        pushq   %rax
+0000000000026b24        movq    %rdi, %r14
+0000000000026b27        movq    0x588(%r14), %r15 ; <-- r15 now points to user-controlled memory
+0000000000026b2e        movl    (%r15), %eax ; <-- read user-controlled dword
+0000000000026b31        movl    -0x8(%r15,%rax,4), %ebx ; <-- use as index for a read
+
+This OOB-read value is passed to nvGLContext::SanityCheckPLLHeader; perhaps it's possible to use this bug to bypass whatever sanity checking these functions are supposed to be doing but I haven't looked yet. At the moment I'm filing this as low severity; I'll update that if I find you might be able to do something more interesting.
+
+This bug is reachable from all sandboxes which allow access to the GPU (eg safari renderer, chrome GPU process.)
+
+Build the PoC with the supplied Makefile.
+
+Tested on OS X 10.10.4 (14E46)

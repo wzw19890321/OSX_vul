@@ -1,0 +1,11 @@
+Issue 487:	OS X coreaudiod calls uninitialized function pointer
+
+Reporting on behalf of Mark Brand:
+
+/usr/sbin/coreaudiod vends the com.apple.audio.coreaudiod service. As well as the MiG services implemented in the subsystem at off_1000DCDA0 this service also listens for a handful of other msgh_id's via the CFRunLoopSourceCreate call in sub_10007693E. This initializes a CFRunLoopSourceContext1 struct setting the perform callback to sub_100076ABA and mallocing a 0x28 byte buffer for the info struct to be passed as the fourth argument to the perform callback. sub_10007693E doesn't initialize all the fields of this structure, and if we send a mach message with msgh_id = 0x46 then the perform handler will call the uninitialized function pointer at offset 0x10 in this structure.
+
+I am able to reproduce the crash without MallocPreScribble enabled, but that would obviously make the crash even clearer.
+
+com.apple.audio.coreaudiod is reachable from various sandboxes including the Safari renderer. coreaudiod is sandboxed and runs as its own user, nevertheless it has access to various other interesting attack surfaces which safari doesn't, allowing this bug to potentially form part of a full sandbox escape chain.
+
+PoC tested on OS X 10.10.4 14E46.

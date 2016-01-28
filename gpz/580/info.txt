@@ -1,0 +1,11 @@
+Issue 580:	OS X Kernel UaF in hypervisor driver
+
+The hv_space lock group gets an extra ref dropped when you kill a process with an AppleHV userclient;
+one via IOService::terminateWorker calling the AppleHVClient::free method (which calls lck_rw_free on the 
+lock group using the pointer hanging off the global _hv variable) and secondly via the hypervisor
+machine_thread_destroy callback (hv_callback_thread_destroy) which also calls lck_rw_free with a lock group
+pointer taken from _hv.
+
+tested on OS X 10.11 ElCapitan (15a284) on MacBookAir 5,2
+
+CVE-2015-7078

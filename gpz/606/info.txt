@@ -1,0 +1,3 @@
+Issue 606:	iOS kernel UaF in AppleOscarCompass
+
+CVE-2016-1719 

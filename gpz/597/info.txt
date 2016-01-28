@@ -1,0 +1,16 @@
+ Issue 597:	io_service_close leads to potentially dangerous IOKit methods being called without locks
+
+It turns out that the spoofed no-more-senders notification bug when applied to iokit objects
+was actually just a more complicated way to hit ::clientClose in parallel. We can in fact
+do this very simply by calling IOServiceClose on two threads :)
+
+Like the spoofed notifications this leads to many bugs in many userclients, the exact nature
+of which depends on the semantics of the clientClose implementation.
+
+In this particular case we hit a kernel UaF.
+
+Tested on El Capitan 10.10.1 15b42 on MacBookAir 5,2
+
+repro: while true; do ./ioparallel_close; done
+
+CVE-2016-1720

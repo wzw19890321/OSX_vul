@@ -1,0 +1,13 @@
+Issue 595:	Exploitable kernel NULL dereference in IntelAccelerator::gstqConfigure
+
+The field at IntelAccelerator+0xe60 is a pointer to a GSTContextKernel allocated in the ::gstqCreateInfoMethod.
+
+In the ::start method this field is initialized to NULL. The IGAccelDevice external method gst_configure (0x206)
+calls gstqConfigure which doesn't check whether the GSTContextKernel pointer is NULL, therefore by calling
+this external method before calling any others which allocate the GSTContextKernel we can cause a kernel
+NULL pointer dereference. The GSTContextKernel structure contains pointers, one of which eventually leads
+to control of a kernel virtual method call. This PoC will kernel panic calling 0xffff800041414141.
+
+Tested on OS X ElCapitan 10.11.1 (15b42) on MacBookAir5,2
+
+CVE-2015-7106

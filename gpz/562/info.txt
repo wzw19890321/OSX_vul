@@ -1,0 +1,7 @@
+Issue 562:	Opening userclient type 12 of IOSCSIPeripheralDeviceType00 leads to an exploitable kernel NULL dereference
+
+Opening userclient type 12 of IOSCSIPeripheralDeviceType00 leads to an exploitable kernel NULL dereference.
+
+Tested on OS X 10.11 ElCapitan (15a284) on MacBookAir5,2
+
+CVE-2015-7068

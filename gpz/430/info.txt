@@ -1,0 +1,25 @@
+Issue 430:	Bad alloca in OS X regex engine (TRE)
+
+The OS X regex engine (TRE) uses the alloca function in a few places, sometimes where an attacker can partially control the size, eg:
+
+static int
+tre_match(const tre_tnfa_t *tnfa, const void *string, size_t len,
+	  tre_str_type_t type, size_t nmatch, regmatch_t pmatch[],
+	  int eflags)
+{
+  reg_errcode_t status;
+  tre_tag_t *tags = NULL;
+  int eo;
+  size_t offset = 0, count = 0;
+  if (tnfa->num_tags > 0 && nmatch > 0)
+    {
+#ifdef TRE_USE_ALLOCA
+      tags = alloca(sizeof(*tags) * tnfa->num_tags);  <-- this is called
+
+num_tags is computed based on the complexity of the regex. It's quite easy to make num_tags large enough for the alloca call to try to allocate more than the available stack space.
+
+OS X alloca is a simple stack pointer subtraction; there are no checks that it's safe or stack-growing by touching each page.
+
+The main process stack has a >50M guard region below it which makes this difficult to hit on the main thread (as the input regex would have to be too long) but pthread stacks are much smaller (512k) and only have a single guard page meaning it's easy to force an alloca which is too large for them. See attached PoC for details of the regex to do this.
+
+CVE-2015-3797

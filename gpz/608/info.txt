@@ -1,0 +1,3 @@
+Issue 608:	iOS kernel UaF in AppleOscarGyro
+
+CVE-2016-1719

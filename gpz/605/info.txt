@@ -1,0 +1,3 @@
+Issue 605:	iOS kernel UaF in AppleOscarCMA
+
+CVE-2016-1719
