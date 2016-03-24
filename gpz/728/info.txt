@@ -1,0 +1,18 @@
+OS X Kernel code execution due to lack of bounds checking in AppleUSBPipe::Abort
+
+External Method 36 of IOUSBInterfaceUserClient is _AbortStreamPipe.
+
+It takes two scalar inputs and uses the second one as an array index to read a pointer
+to a C++ object without checking the bounds then calls a virtual method on it.
+
+Furthermore there's no check that the array pointer is non-null; if it is then we can get a
+controlled offset-from-zero read; since our controlled dword will be multiplied by 8 to
+index the array this means we can easily get the kernel to dereference a controllable
+userspace address.
+
+In this case a value of 0xf0f0f0f0 leads to the kernel reading an IOKit object pointer from
+0x787878780. This poc maps that page to demonstrate control of a kernel object pointer.
+
+tested on MacBookAir5,2  w/10.11.3 (15D21)
+
+CVE-2016-1749

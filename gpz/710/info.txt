@@ -1,0 +1,9 @@
+OS X Kernel use-after-free in AppleKeyStore
+
+The AppleKeyStore userclient uses an IOCommandGate to serialize access to its userclient methods, however
+by racing two threads, one of which closes the userclient (which frees the IOCommandGate)
+and one of which tries to make an external method call we can cause a use-after-free of the IOCommandGate.
+
+Tested on OS X 10.11.3 El Capitan 15D21 on MacBookAir5,2
+
+CVE-2016-1755

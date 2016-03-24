@@ -1,0 +1,20 @@
+OS X Kernel unchecked array index used to read object pointer then call virtual method in nvdia geforce driver
+
+nvDevice::ReleaseDeviceTexture is external method 0x10a of userclient 5 of the geforce IOAccelerator.
+It takes a single uint argument
+
+__text:000000000001BCD2                 mov     r14d, esi
+  ...
+__text:000000000001BD08                 and     r14d, 7FFFFFFFh   <-- clear upper bit
+__text:000000000001BD0F                 mov     rax, [r15+168h]
+__text:000000000001BD16                 mov     rdi, [rax+r14*8]  <-- use as array index
+__text:000000000001BD1A                 test    rdi, rdi
+__text:000000000001BD1D                 jz      short loc_1BD2C
+__text:000000000001BD1F                 mov     rax, [rdi]          <-- read vtable
+__text:000000000001BD22                 call    qword ptr [rax+28h] <-- call OSObject::release
+
+This userclient is part of the nvidia geforce driver so it's only available on devices with that hardware (eg macbookpro.)
+
+This code is reachable from most interesting sandboxes including the safari renderer and the chrome GPU process.
+
+CVE-2016-1741

