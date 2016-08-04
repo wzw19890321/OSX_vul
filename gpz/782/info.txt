@@ -1,0 +1,11 @@
+OS X exploitable kernel NULL pointer dereference in AppleGraphicsDeviceControl
+
+AppleGraphicsDeviceControlClient doesn't check that its pointer to its IOService (at this+0xd8) is non-null before using it
+in all external methods.
+
+We can set this pointer to NULL by racing two threads, one of which calls IOServiceClose which NULLs out the pointer and the
+other of which makes any external method call.
+
+By mapping the NULL page in userspace this gives us trivial kernel RIP control as the code makes a virtual call on a NULL object pointer.
+
+tested on OS X 10.11.4 (15E65) MacBookPro 10,1

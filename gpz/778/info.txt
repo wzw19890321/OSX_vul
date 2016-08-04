@@ -1,0 +1,11 @@
+OS X exploitable kernel NULL dereference in IOAccelSharedUserClient2::page_off_resource
+
+IOAccelerator external method IOAccelSharedUserClient2::page_off_resource uses the pointer at this+0x100 without checking if it's NULL.
+A series of dereferences from this pointer lead to trivial RIP control.
+
+We can race two threads, in one call the external method and in the other call IOServiceClose, which NULLs out the pointer at
+this+0x100.
+
+By mapping the NULL page into userspace we can control the pointer read.
+
+tested on OS X 10.11.4 (15E65) on MacBookAir 5,2

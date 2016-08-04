@@ -1,0 +1,24 @@
+OS X/iOS kernel UAF due to lack of locking in IOHDIXControllerUserClient::testNetBootMethod
+
+External method 4 of IOHDIXControllerUserClient is testNetBootMethod which takes a variables-sized structure input.
+
+This method calls _LOCAL_di_root_image which uses the IOService apis to look up an IOHDIXController object.
+
+On this object it calls ::setProperty("di-root-image", OSString(user_controlled_string))
+
+IOHDIXController overrides the setProperty method and implements it without any locking. When setting the
+"di-root-image" property the code first calls release on the OSNumber* at +0x118 if it is non-null, then sets it to NULL.
+Further down this pointer field is set to point to a new OSNumber object.
+
+This is the first race condition. Since there's no locking two threads can race causing two release calls on an object
+with only one reference leading to a UaF.
+
+Back in _LOCAL_di_root_image the code then calls ::getProperty("di-root-image-result") on the IOHDIXController which is also overriden
+and just returns the pointer at this+0x118 without taking any references.
+
+Since there's no locking anywhere a more likely race condition to occur is that one thread calls ::getProperty("di-root-image-result") then
+the other thread calls ::setProperty("di-root-image", OSString(user_controlled_string)) which frees the OSNumber the first thread has a pointer to.
+
+This leads quite quickly to a UaF when the OSNumber is used in a few places later on.
+
+Tested on OS X 10.11.3 El Capitan 15D21 on MacBookAir5,2

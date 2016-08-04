@@ -1,0 +1,32 @@
+	OS X kernel OOB read of object pointer due to insufficient checks in raw cast to enum type
+
+The IOHIDFamily function IOHIDDevice::handleReportWithTime takes at attacker controlled unchecked IOHIDReportType enum,
+which was cast from an int in either IOHIDLibUserClient::_setReport or _getReport:
+
+            ret = target->setReport(arguments->structureInput, arguments->structureInputSize, (IOHIDReportType)arguments->scalarInput[0]
+
+handleReportWithTime only checks that the enum is <= the max, but enums are really just (signed) ints so there needs to be a lower-bounds
+check here too:
+
+    if ( reportType >= kIOHIDReportTypeCount )
+              return kIOReturnBadArgument;
+
+reportType is then used here:
+        element = GetHeadElement( GetReportHandlerSlot(reportID),
+                                  reportType);
+
+        while ( element ) {
+            shouldTickle |= element->shouldTickleActivity();
+            changed |= element->processReport( reportID,
+
+where GetHeadElement is defined as:
+
+#define GetHeadElement(slot, type)  _reportHandlers[slot].head[type]
+
+This leads to an OOB read off the head array followed by virtual function calls
+
+Tested on OS X 10.11.4 (15E65) on MacBookAir 5,2
+
+Note that repro'ing this might be more involved on other models as there are a lot of different HID devices and drivers.
+
+I can provide panic logs if required.

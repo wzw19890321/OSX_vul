@@ -1,0 +1,13 @@
+OS X/iOS kernel UAF racing getProperty on IOHDIXController and testNetBootMethod on IOHDIXControllerUserClient
+
+This is perhaps a more interesting UaF than just racing testNetBootMethod calls as there looks to be a path to getting free'd memory disclosed back to userspace.
+
+Although the copyProperty macro used by is_io_registry_entry_get_property_bin takes the entry's properties lock before reading and
+taking a reference on the property the testNetBootMethod external method directly calls the overriden setProperty without
+taking that same lock. ::setProperty calls ::release on all the properties before nulling them out then replacing them
+with new objects - we can get a UAF if we can get that ::release call to happen before the ::retain in copyProperty.
+
+This PoC will crash as a UaF but with more care I believe you could get the OSSerialize to serialize an invalid object
+leading to a nice kernel memory disclosure.
+
+Tested on OS X 10.11.3 El Capitan 15D21 on MacBookAir5,2

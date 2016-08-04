@@ -1,0 +1,10 @@
+OS X kernel use-after-free due to bad locking in IOAcceleratorFamily2
+
+In IOAccelContext2::clientMemoryForType the lock_busy/unlock_busy should be extended to cover all the code
+setting up shared memory type 2.
+
+At the moment the lock doesn't protect two threads racing where one reaches
+the release at +0x56AD (outside the lock) while the other is still using those raw pages via the raw pointer at
+IOAccelContext+0x610 inside the locked region.
+
+Tested on OS X 10.11.4 (15E65) on MacBookAir 5,2

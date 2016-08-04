@@ -1,0 +1,9 @@
+	OS X exploitable kernel NULL pointer dereference in nvCommandQueue::GetHandleIndex in GeForce.kext
+
+The method nvCommandQueue::GetHandleIndex doesn't check whether this+0x5b8 is non-null before using it.
+
+We can race a call to this method this with another thread calling IOServiceClose to get a NULL pointer there.
+
+By mapping the NULL page in userspace this gives us trivial kernel RIP control as the code makes a virtual call on a NULL object pointer.
+
+tested on OS X 10.11.4 (15E65) MacBookPro 10,1

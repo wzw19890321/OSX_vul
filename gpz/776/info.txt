@@ -1,0 +1,46 @@
+OS X exploitable kernel NULL pointer dereference in IOAudioEngine
+
+IOAudioEngineUserClient::closeClient sets the audioEngine member pointer to NULL
+
+IOReturn IOAudioEngineUserClient::closeClient()
+{
+    audioDebugIOLog(3, "+ IOAudioEngineUserClient[%p]::closeClient()\n", this);
+
+    if (audioEngine && !isInactive()) {
+        if (isOnline()) {
+            stopClient();
+        }
+        audioEngine->clientClosed(this);
+        audioEngine = NULL;
+
+
+
+External method 0 uses audioEngine without checking if it's NULL:
+
+IOReturn IOAudioEngineUserClient::safeRegisterClientBuffer(UInt32 audioStreamIndex, void * sourceBuffer, UInt32 bufSizeInBytes, UInt32 bufferSetID) {
+
+  audioDebugIOLog(3, "IOAudioEngineUserClient::safeRegisterClientBuffer deprecated for 32 bit %p \n", sourceBuffer); 
+  IOAudioStream *         audioStream;
+  IOReturn            result = kIOReturnBadArgument;
+  
+  audioDebugIOLog(3, "+ IOAudioEngineUserClient::safeRegisterClientBuffer32 %p \n", sourceBuffer); 
+  
+  audioStream = audioEngine->getStreamForID(audioStreamIndex);
+
+
+Whilst that isn't a virtual method, getStreamForID does call a virtual function on a member:
+
+IOAudioStream * IOAudioEngine::getStreamForID(UInt32 streamID) {
+  IOAudioStream *     stream = NULL;
+
+  assert(reserved);
+  if (reserved->streams) {
+    stream = OSDynamicCast (IOAudioStream, reserved->streams->getObject(streamID));
+  }
+
+  return stream;
+}
+
+getObject is a virtual function, and reserved will be read from the NULL page giving us easy RIP control.
+
+tested on OS X 10.11.4 (15E65) MacBookAir 5,2

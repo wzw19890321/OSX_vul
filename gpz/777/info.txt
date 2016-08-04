@@ -1,0 +1,9 @@
+OS X exploitable kernel NULL dereference in CoreCaptureResponder due to unchecked return value
+
+Pretty much all the external methods of CoreCaptureUserClient call CoreCaptureUserClient::stashGet passing an attacker controlled key.
+
+If that key isn't in the list of stashed objects then stashGet returns a NULL pointer. No callers actually check
+the return value though which leads immediately to a call to a virtual method on a NULL pointer. By mapping the NULL
+page we can get trivial RIP control.
+
+Tested on OS X 10.11.4 (15E65) on MacBookAir 5,2
