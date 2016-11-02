@@ -1,0 +1,17 @@
+OS X kernel use-after-free in IOThunderboltFamily
+
+IOThunderboltFamilyUserClient stores a task struct pointer (passed in via IOServiceOpen) in the field at +0xE0 without taking a reference.
+
+By killing the corrisponding task we can free this pointer leaving the user client with a dangling pointer.
+
+IOThunderboltFamilyUserClient uses this dangling pointer to create IOMemoryBuffers which it reads and writes to (believing that it's reading and writing
+into the calling process's task) - by reallocating a privileged process's task struct over the free'd one we could get IOThunderboltFamilyUserClient
+to corrupt its memory.
+
+You could also leverage this bug for kernel memory corruption.
+
+build: clang -o thunderbolt_task_uaf  thunderbolt_task_uaf.c -framework IOKit
+
+You should set gzalloc_min=1024 gzalloc_max=2048 or similar to actually fault on the UaF - otherwise you might see some weird panics!
+
+tested on OS X 10.11.5 (15F34) on MacBookAir5,2

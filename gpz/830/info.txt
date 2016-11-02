@@ -1,0 +1,38 @@
+OS X kernel use-after-free in IOBluetoothFamily.kext
+
+When you create a new IOKit user client from userspace you call:
+
+  kern_return_t IOServiceOpen( io_service_t service, task_port_t owningTask, uint32_t type, io_connect_t *connect );
+
+The owningTask mach port gets converted into a task struct pointer by the MIG deserialization code which then takes
+a reference on the task, calls is_io_service_open_extended passing the task struct then drops its reference.
+
+is_io_service_open_extended will then call through to any overriden newUserClient or initWithTask methods implemented
+by the service.
+
+If those services want to keep a pointer to the "owningTask" then it's very important that they actually take a reference.
+
+We can actually pass any task port as the "owningTask" which means that if the userclient doesn't take a reference
+we can easily pass the task port for another task, kill that task (freeing the task struct) then get the user client
+to use the free'd task struct.
+
+IOBluetoothHCIUserClient (userclient type 0 of IOBluetoothHCIController) can be instantiated by a regular user
+and stores a raw task struct pointer at this+0xe0 without taking a reference.
+
+This pointer is then used in IOBluetoothHCIUserClient::SimpleDispatchWL to build and manipulate IOMemoryDescriptors.
+
+This PoC forks off a child which sends the parent back its task port then spins. The parent then creates a new IOBluetoothHCIUserClient
+passing the child's task port as the owningTask then sigkills the child (freeing it's task struct.) The parent then invokes
+an external method on the user client leading to the UaF.
+
+The IOMemoryDescriptor code does sufficiently weird stuff with the task struct and the memory map hanging off it that
+this bug is clearly exploitable as just a plain memory corruption issue but can probably be leveraged for more interesting
+logic stuff too.
+
+Note that bluetooth does have to be turned on for this PoC to work!
+
+build: clang -o bluetooth_uaf bluetooth_uaf.c -framework IOKit
+
+You should set gzalloc_min=1024 gzalloc_max=2048 or similar to actually fault on the UaF - otherwise you might see some weird panics!
+
+tested on OS X 10.11.5 (15F34) on MacBookAir5,2

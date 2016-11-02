@@ -1,0 +1,48 @@
+Logic issue in launchd message requeuing allows arbitrary mach message control
+
+Launchd was rewritten for 10.10. The old (pre 10.10) launchd was opensource but the newer one
+is closed source *and* stripped so not even function names :(
+
+Nevertheless...
+
+The new launchd is tightly integrated with xpc stuff so this gives us a good foothold to start
+understanding what's going on. All function addresses in this PoC are for the version of launchd shipping with
+the OS X 10.11.6.
+
+10002F3A1 is the handler on the bootstrap port - when a message is received it calls xpc_pipe_try_receive from libxpc
+which checks the msgh_id of the received mach message, if it's 0x10000000 then this is an xpc message and it tries to
+deserialize an xpc object. If this message is a legacy MIG message then xpc_pipe_try_receive calls its 4th argument
+via _xpc_pipe_handle_mig to handle the MIG message. 10002ED33 is the launchd legacy mig handler which checks through
+a couple of legacy MIG subsystems which get registered in 100018ADE (note the calls to 10002E3EE which adds a legacy mig
+subsystem to the array of them.) (100018ADE also registers the handlers for the launchd XPC subsystems (ipc families.))
+
+This is all fine, but interestingly there are actually two call paths to the xpc_demuxer(10002EE87)/mig handler(10002ED33)
+the other one is 10002EC25. The logic of this function is almost the same as 10002F3A1 except there's no call to
+xpc_pipe_try_receive, looking around a bit this function is not responsible for parsing messages directly as they're
+received by launchd but instead it's for "re-parsing" "pended" messages.
+
+In some cases when launchd is unable to immediately service a request it enqueues the request back onto a dispactch queue
+to try again later, and that request eventually ends up here.
+
+This function (10002EC25) only directly accepts an xpc dictionary, but it checks to see if that dictionary has a
+"mig-request" key/value pair, and if it does it reads an xpc_data_t out of the xpc_dictionary and casts it to a
+mach_msg_header_t and passes that via xpc_pipe_handle_mig to 10002ED33 (the legacy MIG handler.)
+
+I can't find anywhere which sets a "mig-request" value so I would guess that this is either
+a debugging feature or left in by accident? Since xpc is a schema-less ipc mechanism we can actually just set a "mig-request"
+key with a completely controlled xpc_data_t payload (the value of which will be treated as a valid mach message which
+launchd received.) The only pre-requisite is working out how to get an XPC message we send to launchd to be pended - it seems
+that subsytem 3 routine 804 (xpc_look_up_endpoint) will sometimes be pended meaning that if we modify one of these
+requests we can end up sending a completely controlled fake mach message through the legacy MIG processing pipeline.
+
+This is an amazing primitive for exploitation - this PoC sends a message with OOL data, when the fake mach message gets
+passed to mach_msg_destroy to destroy the rights and memory it carries this leads to a crash trying to read a mach port
+at 0x414141410000 (this pointer will later also be passed to vm_deallocate.) But you could do a *lot* more with a bug like
+this, for example messing with the refcounts of launchd's ports (because we can specify arbitrary port numbers in our message
+which will be seen as valid ports in launchd's port namespace.) We can also unmap arbitrary pages and cause invalid stuff
+to be passed to the legacy MIG handlers.
+
+In terms of impact launchd is the most privileged process on the system and you can talk to it from any process :-)
+
+This PoC hooks the sending of the target xpc request and injects a "mig-request" xpc_data_t - if it doesn't work try closing
+all open browsers, or restarting with a clean boot.

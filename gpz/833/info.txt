@@ -1,0 +1,17 @@
+OS X kernel use-after-free in CoreStorage
+
+CoreStorageUserClient stores a task struct pointer (passed in via IOServiceOpen) in the field at +0xE0 without taking a reference.
+
+By killing the corrisponding task we can free this pointer leaving the user client with a dangling pointer.
+
+Interestingly CoreStorageUserClient will then use this dangling pointer to perform privilege checks using IOUserClient::clientHasPrivilege
+so if we could get that free'd task struct reallocated by a root owned process (which would be pretty easy) then we could trick these checks into
+believing that we were root. Presumably they do interesting stuff which should be limited to root only like messing with volume information.
+
+You could also leverage this bug for kernel memory corruption.
+
+build: clang -o corestorage_task_uaf  corestorage_task_uaf.c -framework IOKit
+
+You should set gzalloc_min=1024 gzalloc_max=2048 or similar to actually fault on the UaF - otherwise you might see some weird panics!
+
+tested on OS X 10.11.5 (15F34) on MacBookAir5,2
