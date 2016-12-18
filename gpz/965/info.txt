@@ -1,0 +1,27 @@
+XNU kernel UaF due to lack of locking in set_dp_control_port
+
+set_dp_control_port is a MIG method on the host_priv_port so this bug is a root->kernel escalation.
+
+  kern_return_t
+  set_dp_control_port(
+    host_priv_t host_priv,
+    ipc_port_t  control_port) 
+  {
+          if (host_priv == HOST_PRIV_NULL)
+                  return (KERN_INVALID_HOST);
+
+    if (IP_VALID(dynamic_pager_control_port))
+      ipc_port_release_send(dynamic_pager_control_port);
+
+    dynamic_pager_control_port = control_port;
+    return KERN_SUCCESS;
+  }
+
+This should be an atomic operation; there's no locking so two threads can race to see the same value for
+dynamic_pager_control_port and release two references when the kernel only holds one.
+
+This PoC triggers the bug such that the first thread frees the port and the second uses it; a
+more sensible approach towards exploiting it would be to use this race to try to decrement the reference count
+of a port with two references to zero such that you end up with a dangling port pointer.
+
+Tested on MacOS 10.12 16A323
