@@ -1,0 +1,224 @@
+Broken kernel mach port name uref handling on iOS/MacOS can lead to privileged port name replacement in other processes
+
+When sending and receiving mach messages from userspace there are two important kernel objects; ipc_entry and
+ipc_object.
+
+ipc_entry's are the per-process handles or names which a process uses to refer to a particular ipc_object.
+
+ipc_object is the actual message queue (or kernel object) which the port refers to.
+
+ipc_entrys have a pointer to the ipc_object they are a handle for along with the ie_bits field which contains
+the urefs and capacility bits for this name/handle (whether this is a send right, receive right etc.)
+
+  struct ipc_entry {
+    struct ipc_object *ie_object;
+    ipc_entry_bits_t ie_bits;
+    mach_port_index_t ie_index;
+    union {
+      mach_port_index_t next;   /* next in freelist, or...  */
+      ipc_table_index_t request;  /* dead name request notify */
+    } index;
+  };
+
+#define IE_BITS_UREFS_MASK  0x0000ffff  /* 16 bits of user-reference */
+#define IE_BITS_UREFS(bits) ((bits) & IE_BITS_UREFS_MASK)
+
+The low 16 bits of the ie_bits field are the user-reference (uref) count for this name.
+
+Each time a new right is received by a process, if it already had a name for that right the kernel will
+increment the urefs count. Userspace can also arbitrarily control this reference count via mach_port_mod_refs
+and mach_port_deallocate. When the reference count hits 0 the entry is free'd and the name can be re-used to
+name another right.
+
+ipc_right_copyout is called when a right will be copied into a space (for example by sending a port right in a mach
+message to another process.) Here's the code to handle the sending of a send right:
+
+    case MACH_MSG_TYPE_PORT_SEND:
+        assert(port->ip_srights > 0);
+        
+        if (bits & MACH_PORT_TYPE_SEND) {
+            mach_port_urefs_t urefs = IE_BITS_UREFS(bits);
+            
+            assert(port->ip_srights > 1);
+            assert(urefs > 0);
+            assert(urefs < MACH_PORT_UREFS_MAX);
+            
+            if (urefs+1 == MACH_PORT_UREFS_MAX) {
+                if (overflow) {
+                    /* leave urefs pegged to maximum */     <---- (1)
+                    
+                    port->ip_srights--;
+                    ip_unlock(port);
+                    ip_release(port);
+                    return KERN_SUCCESS;
+                }
+                
+                ip_unlock(port);
+                return KERN_UREFS_OVERFLOW;
+            }
+            port->ip_srights--;
+            ip_unlock(port);
+            ip_release(port);
+       
+     ...     
+        
+        entry->ie_bits = (bits | MACH_PORT_TYPE_SEND) + 1;  <---- (2)
+        ipc_entry_modified(space, name, entry);
+        break;
+
+
+If copying this right into this space would cause that right's name's urefs count in that space to hit 0xffff
+then (if overflow is true) we reach the code at (1) which claims in the comment that it will leave urefs pegged at maximum.
+This branch doesn't increase the urefs but still returns KERN_SUCCESS. Almost all callers pass overflow=true.
+
+The reason for this "pegging" was probably not to prevent the reference count from becoming incorrect but rather because
+at (2) if the urefs count wasn't capped the reference count would overflow the 16-bit bitfield into the capability bits.
+
+The issue is that the urefs count isn't "pegged" at all. I would expect "pegged" to mean that the urefs count will now stay at 0xfffe
+and cannot be decremented - leaking the name and associated ipc_object but avoiding the possibilty of a name being over-released.
+
+In fact all that the "peg" does is prevent the urefs count from exceeding 0xfffe; it doesn't prevent userspace from believing
+it has more urefs than that (by eg making the copyout's fail.)
+
+What does this actually mean?
+
+Let's consider the behaviour of mach_msg_server or dispatch_mig_server. They receive mach service messages in a loop and if the message
+they receieved didn't corrispond to the MIG schema they pass that received message to mach_msg_destroy. Here's the code where mach_msg_destroy
+destroys an ool_ports_descriptor_t:
+
+    case MACH_MSG_OOL_PORTS_DESCRIPTOR : {
+      mach_port_t                 *ports;
+      mach_msg_ool_ports_descriptor_t *dsc;
+      mach_msg_type_number_t      j;
+
+      /*
+       * Destroy port rights carried in the message 
+       */
+      dsc = &saddr->ool_ports;
+      ports = (mach_port_t *) dsc->address;
+      for (j = 0; j < dsc->count; j++, ports++)  {
+          mach_msg_destroy_port(*ports, dsc->disposition); // calls mach_port_deallocate
+      }
+    ...
+
+This will call mach_port_deallocate for each ool_port name received.
+
+If we send such a service a mach message with eg 0x20000 copies of the same port right as ool ports the ipc_entry for that name will actually only have
+0xfffe urefs. After 0xfffe calls to mach_port_deallocate the urefs will hit 0 and the kernel will free the ipc_entry and mark that name as free. From this
+point on the name can be re-used to name another right (for example by sending another message received on another thread) but the first thread will
+still call mach_port_deallocate 0x10002 times on that name.
+
+This leads to something like a use-after-deallocate of the mach port name - strictly a userspace bug (there's no kernel memory corruption etc here) but
+caused by a kernel bug.
+
+** Doing something interesting **
+
+Here's one example of how this bug could be used to elevate privileges/escape from sandboxes:
+
+All processes have send rights to the bootstrap server (launchd). When they wish to lookup a service they send messages to this port.
+
+Process A and B run as the same user; A is sandboxed, B isn't. B implements a mach service and A has looked up a send right to the service vended by
+B via launchd.
+
+Process A builds a mach message with 0x10000 ool send rights to the bootstrap server and sends this message to B. B receives the message inside mach_msg_server
+(or a similar function.) When the kernel copies out this message to process B it sees that B already has a name for the boostrap port so increments the urefs count
+for that name for each ool port in the message - there are 0x10000 of those but the urefs count stops incrementing at 0xfffe (but the copy outs still succeed and
+process B sees 0x10000 copies of the same name in the received ool ports descriptor.)
+
+Process B sees that the message doesn't match its MIG schema and passes it to mach_msg_destroy, which calls mach_port_deallocate 0x10000 times, destroying the rights
+carried in the ool ports; since the bootstrap_port name only has 0xfffe urefs after the 0xfffe'th mach_port_deallocate this actually frees the boostrap_port's
+name in process B meaning that it can be reused to name another port right. The important thing to notice here is that process B still believes that the name names
+a send right to launchd (and it will just read the name from the bootstrap_port global variable.)
+
+Process A can then allocate new mach port receive rights and send another message containing send rights to these new ports to process B and try to get the old name
+reused to name one of these send rights - now when process B tries to communicate with launchd it will instead be communicating with process A.
+
+Turning this into code execution outside of the sandbox would depend on what you could transativly do by impersonating launchd in such a fashion but it's surely possible.
+
+Another approach with a more clear path to code execution would be to replace the IOKit master device port using the same technique - there's then a short path to getting
+the target's task port if it tries to open a new IOKit user client since it will pass its task port to io_service_open_extended.
+
+** poc **
+
+This PoC just demonstrates the ability to cause the boostrap port name to be freed in another process - this should be proof enough that there's a very serious bug here.
+
+Use a kernel debugger and showtaskrights to see that sharingd's name for the bootstrap port has been freed but that in userspace the bootstrap_port global is still the old name.
+
+I will work on a full exploit but it's a non-trivial task! Please reach out to me ASAP if you require any futher information about the impact of this bug.
+
+Tested on MacOS Sierra 10.12 (16A323)
+
+------------------------------
+
+Exploit attached :)
+
+The challenge to exploiting this bug is getting the exact same port name reused
+in an interesting way.
+
+This requires us to dig in a bit to exacly what a port name is, how they're allocated
+and under what circumstances they'll be reused.
+
+Mach ports are stored in a flat array of ipc_entrys:
+
+  struct ipc_entry {
+    struct ipc_object *ie_object;
+    ipc_entry_bits_t ie_bits;
+    mach_port_index_t ie_index;
+    union {
+      mach_port_index_t next;   /* next in freelist, or...  */
+      ipc_table_index_t request;  /* dead name request notify */
+    } index;
+  };
+
+mach port names are made up of two fields, the upper 24 bits are an index into the ipc_entrys table
+and the lower 8 bits are a generation number. Each time an entry in the ipc_entrys table is reused
+the generation number is incremented. There are 64 generations, so after an entry has been reallocated
+64 times it will have the same generation number.
+
+The generation number is checked in ipc_entry_lookup:
+
+  if (index <  space->is_table_size) {
+                entry = &space->is_table[index];
+    if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name) ||
+        IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
+      entry = IE_NULL;    
+  }
+
+here entry is the ipc_entry struct in the kernel and name is the user-supplied mach port name.
+
+Entry allocation:
+The ipc_entry table maintains a simple LIFO free list for entries; if this list is free the table will 
+be grown. The table is never shrunk.
+
+Reliably looping mach port names:
+To exploit this bug we need a primitive that allows us to loop a mach port's generation number around.
+
+After triggering the urefs bug to free the target mach port name in the target process we immediately
+send a message with N ool ports (with send rights) and no reply port. Since the target port was the most recently
+freed it will be at the head of the freelist and will be reused to name the first of the ool ports
+contained in the message (but with an incremented generation number.)
+Since this message is not expected by the service (in this case we send an
+invalid XPC request to launchd) it will get passed to mach_msg_destroy which will pass each of 
+the ports to mach_port_deallocate freeing them in the order in which they appear in the message. Since the
+freed port was reused to name the first ool port it will be the first to be freed. This will push the name
+N entries down the freelist.
+
+We then send another 62 of these looper messages but with 2N ool ports. This has the effect of looping the generation
+number of the target port around while leaving it in approximately the middle of the freelist. The next time the target entry
+in the table is allocated it will have exactly the same mach port name as the original target right we
+triggered the urefs bug on.
+
+For this PoC I target the send right to com.apple.CoreServices.coreservicesd which launchd has.
+
+I look up the coreservicesd service in launchd then use the urefs bug to free launchd's send right and use the
+looper messages to spin the generation number round. I then register a large number of dummy services
+with launchd so that one of them reuses the same mach port name as launchd thinks the coreservicesd service has.
+
+Now when any process looks up com.apple.CoreServices.coreservicesd launchd will actually send them a send right
+to one of my dummy services :)
+
+I add all those dummy services to a portset and use that recieve right and the legitimate coreservicesd send right
+I still have to MITM all these new connections to coreservicesd. I look up a few root services which send their
+task ports to coreservices and grab these task ports in the mitm and start a new thread in the uid 0 process to run a shell command as root :)
+
+The whole flow seems to work about 50% of the time.
