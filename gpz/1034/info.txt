@@ -1,0 +1,24 @@
+iOS/MacOS kernel UaF due to lack of locking in host_self_trap
+
+The task struct has a lock (itk_lock_data, taken via the itk_lock macros) which is supposed to
+protect the task->itk_* ports.
+
+The host_self_trap mach trap accesses task->itk_host without taking this lock leading to a use-after-free
+given the following interleaving of execution:
+
+Thread A: host_self_trap:
+  read current_task()->itk_host         // Thread A reads itk_host
+
+Thread B: task_set_special_port:
+  *whichp = port;                       // Thread B replaces itk_host with eg MACH_PORT_NULL
+  itk_unlock(task);
+  
+  if (IP_VALID(old))
+    ipc_port_release_send(old);         // Thread B drops last ref on itk_host
+
+Thread A: host_self_trap:
+  passes the port to ipc_port_copy_send // uses the free'd port
+
+host_self_trap should use one of the canonical accessors for the task's host port, not just directly read it.
+
+PoC tested on MacOS 10.12.1
