@@ -1,0 +1,32 @@
+MacOS kernel memory corruption due to off-by-one in audit_sdev_open
+
+The auditsession device has a copy-pasted version of the same bug as the auditpipe device:
+
+  static int
+  audit_sdev_open(dev_t dev, __unused int flags,  __unused int devtype, proc_t p)
+  {
+    struct audit_sdev *asdev;
+    struct auditinfo_addr aia;
+    int u;
+
+    u = minor(dev);
+    if (u < 0 || u > MAX_AUDIT_SDEVS)
+      return (ENXIO);
+
+    (void) audit_sdev_get_aia(p, &aia);
+
+    AUDIT_SDEV_LIST_WLOCK();
+    asdev = audit_sdev_dtab[u];
+
+
+Again, that bounds check on the minor number should be >= MAX_AUDIT_SDEVS.
+
+In the auditsession case we again end up with that oob pointer being confused with a counter,
+in this case audit_sdev_drops allowing us to arbitrarily increment a struct audit_sdev pointer.
+
+This is a root -> kernel privesc as you need to be able to mknod the auditsession device with a controlled
+minor number.
+
+tested on MacOS 10.12.3 (16D32) on MacbookAir5,2
+
+This issue was considered a duplicate of CVE-2017-2483

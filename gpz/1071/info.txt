@@ -1,0 +1,13 @@
+MacOS kernel code execution due to lack of bounds checking in AppleIntelCapriController::GetLinkConfig
+
+Selector 0x921 of IntelFBClientControl ends up in AppleIntelCapriController::GetLinkConfig
+
+This method takes a structure input and output buffer. It reads an attacker controlled dword from the input buffer which it
+uses to index an array of pointers with no bounds checking:
+
+This pointer is passed to AppleIntelFramebuffer::validateDisplayMode and the uint64 at offset +2130h is used as a C++ object pointer
+on which a virtual method is called. With some heap grooming this could be used to get kernel code execution.
+
+tested on MacOS Sierra 10.12.2 (16C67)
+
+CVE-2017-2443

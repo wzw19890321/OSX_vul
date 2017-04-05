@@ -1,0 +1,62 @@
+MacOS/iOS kernel double free due to bad locking in fsevents device
+
+fseventsf_ioctl handles ioctls on fsevent fds acquired via FSEVENTS_CLONE_64 on /dev/fsevents
+
+Heres the code for the FSEVENTS_DEVICE_FILTER_64 ioctl:
+
+    case FSEVENTS_DEVICE_FILTER_64:
+      if (!proc_is64bit(vfs_context_proc(ctx))) {
+        ret = EINVAL;
+        break;
+      }
+      devfilt_args = (fsevent_dev_filter_args64 *)data;
+      
+    handle_dev_filter:
+    {
+      int new_num_devices;
+      dev_t *devices_not_to_watch, *tmp=NULL;
+      
+      if (devfilt_args->num_devices > 256) {
+        ret = EINVAL;
+        break;
+      }
+      
+      new_num_devices = devfilt_args->num_devices;
+      if (new_num_devices == 0) {
+        tmp = fseh->watcher->devices_not_to_watch;   <------ (a)
+        
+        lock_watch_table();                          <------ (b)
+        fseh->watcher->devices_not_to_watch = NULL;
+        fseh->watcher->num_devices = new_num_devices;
+        unlock_watch_table();                        <------ (c)
+        
+        if (tmp) {
+          FREE(tmp, M_TEMP);                         <------ (d)
+        }
+        break;
+      }
+
+There's nothing stopping two threads seeing the same value for devices_not_to_watch at (a),
+assigning that to tmp then freeing it at (d). The lock/unlock at (b) and (c) don't protect this.
+
+This leads to a double free, which if you also race allocations from the same zone can lead to an
+exploitable kernel use after free.
+
+/dev/fsevents is:
+crw-r--r--  1 root  wheel   13,   0 Feb 15 14:00 /dev/fsevents
+
+so this is a privesc from either root or members of the wheel group to kernel
+
+tested on MacOS 10.12.3 (16D32) on MacbookAir5,2
+
+(build with -O3)
+
+The open handler for the fsevents device node has a further access check:
+
+  if (!kauth_cred_issuser(kauth_cred_get())) {
+    return EPERM;
+  }
+
+restricting this issue to root only despite the permissions on the device node (which is world-readable)
+
+CVE-2017-2490
